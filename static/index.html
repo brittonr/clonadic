@@ -264,6 +264,66 @@
       outline-offset: -2px;
     }
 
+    /* Cut/Copy/Move visual feedback */
+    .cell.cut-source {
+      opacity: 0.5;
+      outline: 2px dashed var(--accent);
+      outline-offset: -2px;
+    }
+
+    .cell.copy-source {
+      outline: 2px dashed var(--success);
+      outline-offset: -2px;
+    }
+
+    .cell.drag-source {
+      opacity: 0.4;
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .cell.drop-target {
+      background: rgba(59, 130, 246, 0.3);
+      outline: 2px dashed var(--accent);
+      outline-offset: -2px;
+    }
+
+    .cell.drop-target-invalid {
+      background: rgba(239, 68, 68, 0.2);
+      outline: 2px dashed var(--error);
+      outline-offset: -2px;
+    }
+
+    /* Drag preview ghost */
+    .drag-preview {
+      position: fixed;
+      pointer-events: none;
+      z-index: 1000;
+      background: var(--surface);
+      border: 2px solid var(--accent);
+      padding: 4px 8px;
+      font-size: 12px;
+      opacity: 0.9;
+      white-space: nowrap;
+    }
+
+    /* Clipboard indicator in footer */
+    .clipboard-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--accent);
+      font-size: 11px;
+    }
+
+    .clipboard-indicator.cut {
+      color: var(--error);
+    }
+
+    .clipboard-indicator:empty {
+      display: none;
+    }
+
     footer {
       background: var(--surface);
       border-top: 1px solid var(--border);
@@ -567,12 +627,18 @@
     let isInPointMode = false;
     let pointModeRangeStart = null; // For shift+click range selection
 
+    // Clipboard state for cut/copy/paste and drag-to-move
+    let clipboard = null; // { cells: [{row, col, value, formula}], mode: 'cut'|'copy', sourceRange: {startRow, startCol, endRow, endCol} }
+    let isDragToMove = false;
+    let dragMoveStart = null; // Starting position for drag-to-move
+
     function init() {
       renderGrid();
       selectCell(1, 1);
       loadGrid();
       setupAutocomplete();
       setupPointMode();
+      setupClipboard();
     }
 
     function setupAutocomplete() {
@@ -927,6 +993,445 @@
       });
     }
 
+    // ========================================
+    // Clipboard & Cell Moving Functions
+    // ========================================
+
+    function setupClipboard() {
+      // Keyboard shortcuts for cut/copy/paste/delete
+      document.addEventListener('keydown', handleClipboardKeydown);
+    }
+
+    function handleClipboardKeydown(e) {
+      // Only handle when not in formula input or in point mode
+      if (document.activeElement.id === 'formula-input') {
+        return;
+      }
+
+      // Ctrl/Cmd + X = Cut
+      if ((e.ctrlKey || e.metaKey) && e.key === 'x') {
+        e.preventDefault();
+        cutSelectedCells();
+        return;
+      }
+
+      // Ctrl/Cmd + C = Copy
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        e.preventDefault();
+        copySelectedCells();
+        return;
+      }
+
+      // Ctrl/Cmd + V = Paste
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        e.preventDefault();
+        pasteClipboard();
+        return;
+      }
+
+      // Delete or Backspace = Clear cells
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        clearSelectedCells();
+        return;
+      }
+    }
+
+    function cutSelectedCells() {
+      const selectedCells = getSelectedCells();
+      if (selectedCells.length === 0) return;
+
+      // Store cell data in clipboard
+      clipboard = {
+        cells: selectedCells.map(({ row, col }) => {
+          const key = `${row},${col}`;
+          const cellData = cells[key] || {};
+          return {
+            row,
+            col,
+            value: cellData.formula || cellData.display || '',
+            formula: cellData.formula || null
+          };
+        }),
+        mode: 'cut',
+        sourceRange: getSelectionBounds()
+      };
+
+      // Visual feedback - mark cells as cut
+      clearClipboardVisuals();
+      selectedCells.forEach(({ row, col }) => {
+        const cellEl = getCellElement(row, col);
+        if (cellEl) {
+          cellEl.classList.add('cut-source');
+        }
+      });
+
+      updateClipboardIndicator();
+    }
+
+    function copySelectedCells() {
+      const selectedCells = getSelectedCells();
+      if (selectedCells.length === 0) return;
+
+      // Store cell data in clipboard
+      clipboard = {
+        cells: selectedCells.map(({ row, col }) => {
+          const key = `${row},${col}`;
+          const cellData = cells[key] || {};
+          return {
+            row,
+            col,
+            value: cellData.formula || cellData.display || '',
+            formula: cellData.formula || null
+          };
+        }),
+        mode: 'copy',
+        sourceRange: getSelectionBounds()
+      };
+
+      // Visual feedback - mark cells as copied
+      clearClipboardVisuals();
+      selectedCells.forEach(({ row, col }) => {
+        const cellEl = getCellElement(row, col);
+        if (cellEl) {
+          cellEl.classList.add('copy-source');
+        }
+      });
+
+      updateClipboardIndicator();
+    }
+
+    async function pasteClipboard() {
+      if (!clipboard || clipboard.cells.length === 0) return;
+
+      const { startRow: srcStartRow, startCol: srcStartCol } = clipboard.sourceRange;
+      const { row: destRow, col: destCol } = selectedCell;
+
+      // Calculate offset from source to destination
+      const rowOffset = destRow - srcStartRow;
+      const colOffset = destCol - srcStartCol;
+
+      showLoading();
+
+      try {
+        // Process each cell in the clipboard
+        for (const cellData of clipboard.cells) {
+          const newRow = cellData.row + rowOffset;
+          const newCol = cellData.col + colOffset;
+
+          // Skip if destination is out of bounds
+          if (newRow < 1 || newRow > ROWS || newCol < 1 || newCol > COLS) {
+            continue;
+          }
+
+          let valueToSet = cellData.value;
+
+          // For copy mode, adjust relative references in formulas
+          if (clipboard.mode === 'copy' && cellData.formula) {
+            valueToSet = adjustFormulaReferences(cellData.formula, rowOffset, colOffset);
+          }
+
+          // Send update to server
+          await updateCellOnServer(newRow, newCol, valueToSet);
+        }
+
+        // If cut mode, clear the source cells
+        if (clipboard.mode === 'cut') {
+          for (const cellData of clipboard.cells) {
+            // Don't clear if source and dest overlap
+            const destRow = cellData.row + rowOffset;
+            const destCol = cellData.col + colOffset;
+            if (cellData.row !== destRow || cellData.col !== destCol) {
+              await updateCellOnServer(cellData.row, cellData.col, '');
+            }
+          }
+          // Clear clipboard after cut-paste
+          clipboard = null;
+        }
+
+        // Reload grid to show changes
+        await loadGrid();
+
+      } catch (error) {
+        console.error('Paste error:', error);
+      }
+
+      hideLoading();
+      clearClipboardVisuals();
+      updateClipboardIndicator();
+    }
+
+    async function clearSelectedCells() {
+      const selectedCells = getSelectedCells();
+      if (selectedCells.length === 0) return;
+
+      showLoading();
+
+      try {
+        for (const { row, col } of selectedCells) {
+          await updateCellOnServer(row, col, '');
+        }
+        await loadGrid();
+      } catch (error) {
+        console.error('Clear cells error:', error);
+      }
+
+      hideLoading();
+    }
+
+    async function updateCellOnServer(row, col, value) {
+      const response = await fetch('/api/cell', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ row, col, value })
+      });
+      return response.json();
+    }
+
+    function adjustFormulaReferences(formula, rowOffset, colOffset) {
+      if (!formula.startsWith('=')) return formula;
+
+      // Tokenize and adjust cell references
+      const delimiters = '(),+-*/^&=<>: ';
+      let result = '';
+      let currentToken = '';
+
+      for (let i = 0; i < formula.length; i++) {
+        const char = formula[i];
+        if (delimiters.includes(char)) {
+          if (currentToken) {
+            result += adjustToken(currentToken, rowOffset, colOffset);
+            currentToken = '';
+          }
+          result += char;
+        } else {
+          currentToken += char;
+        }
+      }
+
+      if (currentToken) {
+        result += adjustToken(currentToken, rowOffset, colOffset);
+      }
+
+      return result;
+    }
+
+    function adjustToken(token, rowOffset, colOffset) {
+      const upperToken = token.toUpperCase();
+
+      // Check if it's a range (A1:B5)
+      if (upperToken.includes(':')) {
+        const parts = token.split(':');
+        if (parts.length === 2) {
+          const adjusted1 = adjustSingleRef(parts[0], rowOffset, colOffset);
+          const adjusted2 = adjustSingleRef(parts[1], rowOffset, colOffset);
+          if (adjusted1 && adjusted2) {
+            return adjusted1 + ':' + adjusted2;
+          }
+        }
+        return token;
+      }
+
+      // Single cell reference
+      const adjusted = adjustSingleRef(token, rowOffset, colOffset);
+      return adjusted || token;
+    }
+
+    function adjustSingleRef(ref, rowOffset, colOffset) {
+      const match = ref.toUpperCase().match(/^([A-Z]+)(\d+)$/);
+      if (!match) return null;
+
+      const colStr = match[1];
+      const rowNum = parseInt(match[2]);
+
+      // Convert column letters to number
+      let col = 0;
+      for (let i = 0; i < colStr.length; i++) {
+        col = col * 26 + (colStr.charCodeAt(i) - 64);
+      }
+
+      // Apply offset
+      const newRow = rowNum + rowOffset;
+      const newCol = col + colOffset;
+
+      // Check bounds
+      if (newRow < 1 || newRow > ROWS || newCol < 1 || newCol > COLS) {
+        return '#REF!';
+      }
+
+      return colToLetter(newCol) + newRow;
+    }
+
+    function getSelectionBounds() {
+      if (selectedRange) {
+        return selectedRange;
+      }
+      return {
+        startRow: selectedCell.row,
+        startCol: selectedCell.col,
+        endRow: selectedCell.row,
+        endCol: selectedCell.col
+      };
+    }
+
+    function clearClipboardVisuals() {
+      document.querySelectorAll('.cell.cut-source, .cell.copy-source, .cell.drag-source, .cell.drop-target').forEach(cell => {
+        cell.classList.remove('cut-source', 'copy-source', 'drag-source', 'drop-target', 'drop-target-invalid');
+      });
+    }
+
+    function updateClipboardIndicator() {
+      // The indicator is shown in footer - we'll just log for now
+      // Could add a visual indicator element if needed
+    }
+
+    // ========================================
+    // Drag-to-Move Functions
+    // ========================================
+
+    function startDragToMove(e, row, col) {
+      // Only start drag-to-move if we're clicking on a selected cell
+      const isInSelection = isCoordInSelection(row, col);
+      if (!isInSelection) return false;
+
+      isDragToMove = true;
+      dragMoveStart = { row, col };
+
+      // Mark source cells
+      const selectedCells = getSelectedCells();
+      selectedCells.forEach(({ row, col }) => {
+        const cellEl = getCellElement(row, col);
+        if (cellEl) {
+          cellEl.classList.add('drag-source');
+        }
+      });
+
+      return true;
+    }
+
+    function updateDragToMoveTarget(row, col) {
+      if (!isDragToMove) return;
+
+      // Clear previous drop target visuals
+      document.querySelectorAll('.cell.drop-target, .cell.drop-target-invalid').forEach(cell => {
+        cell.classList.remove('drop-target', 'drop-target-invalid');
+      });
+
+      // Calculate where the selection would land
+      const bounds = getSelectionBounds();
+      const rowOffset = row - dragMoveStart.row;
+      const colOffset = col - dragMoveStart.col;
+
+      const newStartRow = bounds.startRow + rowOffset;
+      const newStartCol = bounds.startCol + colOffset;
+      const newEndRow = bounds.endRow + rowOffset;
+      const newEndCol = bounds.endCol + colOffset;
+
+      // Check if destination is valid
+      const isValid = newStartRow >= 1 && newEndRow <= ROWS &&
+                      newStartCol >= 1 && newEndCol <= COLS;
+
+      // Highlight destination cells
+      for (let r = newStartRow; r <= newEndRow; r++) {
+        for (let c = newStartCol; c <= newEndCol; c++) {
+          const cellEl = getCellElement(r, c);
+          if (cellEl) {
+            cellEl.classList.add(isValid ? 'drop-target' : 'drop-target-invalid');
+          }
+        }
+      }
+    }
+
+    async function completeDragToMove(row, col) {
+      if (!isDragToMove) return;
+
+      isDragToMove = false;
+
+      // Calculate offset
+      const bounds = getSelectionBounds();
+      const rowOffset = row - dragMoveStart.row;
+      const colOffset = col - dragMoveStart.col;
+
+      // If no movement, just clean up
+      if (rowOffset === 0 && colOffset === 0) {
+        clearClipboardVisuals();
+        dragMoveStart = null;
+        return;
+      }
+
+      // Check if destination is valid
+      const newStartRow = bounds.startRow + rowOffset;
+      const newStartCol = bounds.startCol + colOffset;
+      const newEndRow = bounds.endRow + rowOffset;
+      const newEndCol = bounds.endCol + colOffset;
+
+      if (newStartRow < 1 || newEndRow > ROWS || newStartCol < 1 || newEndCol > COLS) {
+        clearClipboardVisuals();
+        dragMoveStart = null;
+        return;
+      }
+
+      showLoading();
+
+      try {
+        // Get all cells to move
+        const selectedCells = getSelectedCells();
+        const cellsToMove = selectedCells.map(({ row, col }) => {
+          const key = `${row},${col}`;
+          const cellData = cells[key] || {};
+          return {
+            row,
+            col,
+            value: cellData.formula || cellData.display || '',
+            formula: cellData.formula || null
+          };
+        });
+
+        // First, set all destination cells
+        for (const cellData of cellsToMove) {
+          const newRow = cellData.row + rowOffset;
+          const newCol = cellData.col + colOffset;
+          await updateCellOnServer(newRow, newCol, cellData.value);
+        }
+
+        // Then, clear source cells (only those not overlapping with destination)
+        for (const cellData of cellsToMove) {
+          const destRow = cellData.row + rowOffset;
+          const destCol = cellData.col + colOffset;
+
+          // Check if this source cell is NOT a destination cell
+          const isDestination = cellsToMove.some(c =>
+            c.row + rowOffset === cellData.row && c.col + colOffset === cellData.col
+          );
+
+          if (!isDestination) {
+            await updateCellOnServer(cellData.row, cellData.col, '');
+          }
+        }
+
+        // Reload grid
+        await loadGrid();
+
+        // Update selection to new location
+        selectCell(selectedCell.row + rowOffset, selectedCell.col + colOffset);
+
+      } catch (error) {
+        console.error('Drag-to-move error:', error);
+      }
+
+      hideLoading();
+      clearClipboardVisuals();
+      dragMoveStart = null;
+    }
+
+    function isCoordInSelection(row, col) {
+      if (selectedRange) {
+        return row >= selectedRange.startRow && row <= selectedRange.endRow &&
+               col >= selectedRange.startCol && col <= selectedRange.endCol;
+      }
+      return row === selectedCell.row && col === selectedCell.col;
+    }
+
     async function fetchAutocompleteSuggestions(input) {
       if (!input.startsWith('=')) {
         hideAutocomplete();
@@ -1091,6 +1596,19 @@
         return;
       }
 
+      // Check if clicking on already selected cells - initiate drag-to-move
+      if (isCoordInSelection(row, col) && !e.shiftKey) {
+        if (startDragToMove(e, row, col)) {
+          isDragging = true;
+          dragStart = { row, col };
+          dragEnd = { row, col };
+          return;
+        }
+      }
+
+      // Clear any existing clipboard visuals when starting new selection
+      clearClipboardVisuals();
+
       isDragging = true;
       dragStart = { row, col };
       dragEnd = { row, col };
@@ -1107,6 +1625,13 @@
         return;
       }
 
+      // Drag-to-move: update drop target visualization
+      if (isDragToMove && isDragging) {
+        dragEnd = { row, col };
+        updateDragToMoveTarget(row, col);
+        return;
+      }
+
       if (!isDragging || !dragStart) return;
 
       dragEnd = { row, col };
@@ -1115,6 +1640,15 @@
 
     function handleMouseUp() {
       if (!isDragging) return;
+
+      // Drag-to-move: complete the move operation
+      if (isDragToMove && dragEnd) {
+        isDragging = false;
+        completeDragToMove(dragEnd.row, dragEnd.col);
+        dragStart = null;
+        dragEnd = null;
+        return;
+      }
 
       // Point mode: complete range selection on mouse up
       if (isInPointMode && dragStart && dragEnd) {
