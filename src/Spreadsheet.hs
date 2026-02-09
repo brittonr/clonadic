@@ -148,40 +148,38 @@ isFormula t = T.isPrefixOf "=" (T.strip t)
 -- The cursed part: Claude evaluates spreadsheet formulas
 evaluateFormula :: Text -> Grid -> Clonad CellValue
 evaluateFormula formulaText grid = do
-  let context = gridContext grid
-      formula = T.strip formulaText
-  -- Claude does the math. Every time. For every formula.
+  let formula = T.strip formulaText
+      -- Build a clearer context: substitute values directly into explanation
+      refs = extractCellRefs formula
+      cellValues = [(coordToRef coord, getCellNumericValue coord grid) | coord <- refs]
+      nonEmpty = [(ref, v) | (ref, Just v) <- cellValues]
+      valuesText = if null nonEmpty
+                   then "All cells are empty (value 0)"
+                   else T.intercalate ", " [ref <> "=" <> T.pack (show v) | (ref, v) <- nonEmpty]
   result <-
     clonad @(Text, Text) @Text
       ( T.unlines
-          [ "You are a spreadsheet formula engine. Evaluate the given formula.",
-            "Cell values are provided as context.",
+          [ "Evaluate this spreadsheet formula. Return ONLY the numeric answer.",
             "",
-            "Return formats:",
-            "  - Numbers: just the number (e.g., 42, 3.14, -5)",
-            "  - Text: the text value without quotes (e.g., Hello World)",
-            "  - Booleans: TRUE or FALSE (uppercase)",
-            "  - Errors: ERROR: <reason>",
-            "",
-            "Do not explain. Just return the result value.",
+            "Rules:",
+            "- Empty cells = 0",
+            "- SUM adds all values",
+            "- Return just the number, nothing else",
             "",
             "Examples:",
-            "  =2+2  ->  4",
-            "  =A1*B1 (A1=10, B1=5)  ->  50",
-            "  =SUM(A1:A3) (A1=1, A2=2, A3=3)  ->  6",
-            "  =IF(A1>10, \"big\", \"small\") (A1=15)  ->  big",
-            "  =CONCAT(A1, B1) (A1=\"Hello\", B1=\" World\")  ->  Hello World",
-            "  =UPPER(A1) (A1=\"hello\")  ->  HELLO",
-            "  =LEFT(A1, 3) (A1=\"Hello\")  ->  Hel",
-            "  =LEN(A1) (A1=\"Hello\")  ->  5",
-            "  =A1>10 (A1=15)  ->  TRUE",
-            "  =AND(A1>5, B1<20) (A1=10, B1=15)  ->  TRUE",
-            "  =ISBLANK(A1) (A1 is empty)  ->  TRUE",
-            "  =A1 (A1 is empty)  ->  ERROR: A1 is empty"
+            "=SUM(A1:A3) with A1=1, A2=2, A3=3 -> 6",
+            "=SUM(A1:A3) with A1=5 -> 5",
+            "=2+2 -> 4",
+            "=A1*B1 with A1=10, B1=5 -> 50"
           ]
       )
-      (formula, context)
+      (formula <> " with " <> valuesText, "")
   pure $ parseResult result
+  where
+    getCellNumericValue :: Coord -> Grid -> Maybe Double
+    getCellNumericValue coord g = case cellValue (getCell coord g) of
+      CellNumber n -> Just n
+      _ -> Nothing
 
 gridContext :: Grid -> Text
 gridContext grid =
@@ -213,34 +211,39 @@ gridContextText = gridContext
 -- Version of evaluateFormula that logs the prompt and response
 evaluateFormulaWithLogging :: Text -> Grid -> Clonad CellValue
 evaluateFormulaWithLogging formulaText grid = do
-  let context = gridContext grid
-      formula = T.strip formulaText
+  let formula = T.strip formulaText
+      refs = extractCellRefs formula
+      cellValues = [(coordToRef coord, getCellNumericValue coord grid) | coord <- refs]
+      nonEmpty = [(ref, v) | (ref, Just v) <- cellValues]
+      valuesText = if null nonEmpty
+                   then "All cells are empty (value 0)"
+                   else T.intercalate ", " [ref <> "=" <> T.pack (show v) | (ref, v) <- nonEmpty]
+      inputText = formula <> " with " <> valuesText
       systemPrompt = T.unlines
-          [ "You are a spreadsheet formula engine. Evaluate the given formula.",
-            "Cell values are provided as context.",
+          [ "Evaluate this spreadsheet formula. Return ONLY the numeric answer.",
             "",
-            "Return formats:",
-            "  - Numbers: just the number (e.g., 42, 3.14, -5)",
-            "  - Text: the text value without quotes (e.g., Hello World)",
-            "  - Booleans: TRUE or FALSE (uppercase)",
-            "  - Errors: ERROR: <reason>",
-            "",
-            "Do not explain. Just return the result value.",
+            "Rules:",
+            "- Empty cells = 0",
+            "- SUM adds all values",
+            "- Return just the number, nothing else",
             "",
             "Examples:",
-            "  =2+2  ->  4",
-            "  =IF(A1>10, \"big\", \"small\") (A1=15)  ->  big",
-            "  =CONCAT(A1, B1) (A1=\"Hello\", B1=\" World\")  ->  Hello World",
-            "  =A1>10 (A1=15)  ->  TRUE",
-            "  =A1 (A1 is empty)  ->  ERROR: A1 is empty"
+            "=SUM(A1:A3) with A1=1, A2=2, A3=3 -> 6",
+            "=SUM(A1:A3) with A1=5 -> 5",
+            "=2+2 -> 4"
           ]
   -- Log the full prompt
   let _ = trace ("\n=== LLM PROMPT ===\nSystem: " ++ T.unpack systemPrompt ++
-                 "\nInput: (" ++ T.unpack formula ++ ", " ++ T.unpack context ++ ")\n=================") ()
-  result <- clonad @(Text, Text) @Text systemPrompt (formula, context)
+                 "\nInput: " ++ T.unpack inputText ++ "\n=================") ()
+  result <- clonad @(Text, Text) @Text systemPrompt (inputText, "")
   -- Log the response
   let _ = trace ("\n=== LLM RESPONSE ===\n" ++ T.unpack result ++ "\n====================") ()
   pure $ parseResult result
+  where
+    getCellNumericValue :: Coord -> Grid -> Maybe Double
+    getCellNumericValue coord g = case cellValue (getCell coord g) of
+      CellNumber n -> Just n
+      _ -> Nothing
 
 parseResult :: Text -> CellValue
 parseResult t =

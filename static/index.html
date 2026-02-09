@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ClonadSheet</title>
-  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   <style>
     :root {
       --bg: #0a0a0a;
@@ -606,31 +605,55 @@
   </div>
 
   <script>
-    const ROWS = 20;
-    const COLS = 10;
+    const ROWS = 20, COLS = 10, DELIM = '(),+-*/^&=<>: ';
 
-    let selectedCell = { row: 1, col: 1 };
-    let cells = {};
+    let selectedCell = { row: 1, col: 1 }, cells = {}, selectedRange = null;
+    let isDragging = false, dragStart = null, dragEnd = null;
+    let autocompleteSelectedIndex = -1, autocompleteSuggestions = [], autocompleteDebounceTimer = null;
+    let isInPointMode = false, pointModeRangeStart = null, pointModeNavPosition = null;
+    let clipboard = null, isDragToMove = false, dragMoveStart = null;
 
-    // Drag selection state
-    let isDragging = false;
-    let dragStart = null;
-    let dragEnd = null;
-    let selectedRange = null; // { startRow, startCol, endRow, endCol } or null for single cell
+    const $ = id => document.getElementById(id);
+    const $$ = sel => document.querySelectorAll(sel);
 
-    // Autocomplete state
-    let autocompleteSelectedIndex = -1;
-    let autocompleteSuggestions = [];
-    let autocompleteDebounceTimer = null;
+    function colToLetter(c) {
+      let r = '';
+      while (c > 0) { c--; r = String.fromCharCode(65 + c % 26) + r; c = Math.floor(c / 26); }
+      return r;
+    }
 
-    // Point mode state - for clicking cells to insert references during formula editing
-    let isInPointMode = false;
-    let pointModeRangeStart = null; // For shift+click range selection
+    function letterToCol(s) {
+      let c = 0;
+      for (let i = 0; i < s.length; i++) c = c * 26 + s.charCodeAt(i) - 64;
+      return c;
+    }
 
-    // Clipboard state for cut/copy/paste and drag-to-move
-    let clipboard = null; // { cells: [{row, col, value, formula}], mode: 'cut'|'copy', sourceRange: {startRow, startCol, endRow, endCol} }
-    let isDragToMove = false;
-    let dragMoveStart = null; // Starting position for drag-to-move
+    function parseRef(ref) {
+      const m = ref.match(/^([A-Z]+)(\d+)$/);
+      if (!m) return null;
+      const col = letterToCol(m[1]), row = parseInt(m[2]);
+      return (row > 0 && row <= ROWS && col > 0 && col <= COLS) ? { row, col } : null;
+    }
+
+    function getCellElement(row, col) {
+      return document.querySelector(`.cell[data-row="${row}"][data-col="${col}"]`);
+    }
+
+    function findLastDelim(s) {
+      for (let i = s.length - 1; i >= 0; i--) if (DELIM.includes(s[i])) return i;
+      return -1;
+    }
+
+    function tokenize(s) {
+      const tokens = []; let cur = '';
+      for (const c of s) { if (DELIM.includes(c)) { if (cur) tokens.push(cur); cur = ''; } else cur += c; }
+      if (cur) tokens.push(cur);
+      return tokens;
+    }
+
+    function normalizeBounds(r1, c1, r2, c2) {
+      return { startRow: Math.min(r1, r2), startCol: Math.min(c1, c2), endRow: Math.max(r1, r2), endCol: Math.max(c1, c2) };
+    }
 
     function init() {
       renderGrid();
@@ -638,1455 +661,471 @@
       loadGrid();
       setupAutocomplete();
       setupPointMode();
-      setupClipboard();
+      document.addEventListener('keydown', handleClipboardKeydown);
     }
 
     function setupAutocomplete() {
-      const input = document.getElementById('formula-input');
-      const dropdown = document.getElementById('autocomplete-dropdown');
-
-      input.addEventListener('keydown', (e) => {
+      const input = $('formula-input'), dropdown = $('autocomplete-dropdown');
+      input.addEventListener('keydown', e => {
         if (dropdown.classList.contains('active') && autocompleteSuggestions.length > 0) {
-          if (e.key === 'ArrowDown') {
-            e.preventDefault();
-            autocompleteSelectedIndex = Math.min(autocompleteSelectedIndex + 1, autocompleteSuggestions.length - 1);
-            updateAutocompleteSelection();
-            return;
-          }
-          if (e.key === 'ArrowUp') {
-            e.preventDefault();
-            autocompleteSelectedIndex = Math.max(autocompleteSelectedIndex - 1, 0);
-            updateAutocompleteSelection();
-            return;
-          }
-          if (e.key === 'Tab' || (e.key === 'Enter' && autocompleteSelectedIndex >= 0)) {
-            e.preventDefault();
-            applyAutocompleteSuggestion(autocompleteSelectedIndex);
-            return;
-          }
-          if (e.key === 'Escape') {
-            hideAutocomplete();
-            return;
-          }
+          if (e.key === 'ArrowDown') { e.preventDefault(); autocompleteSelectedIndex = Math.min(autocompleteSelectedIndex + 1, autocompleteSuggestions.length - 1); updateAutocompleteSelection(); return; }
+          if (e.key === 'ArrowUp') { e.preventDefault(); autocompleteSelectedIndex = Math.max(autocompleteSelectedIndex - 1, 0); updateAutocompleteSelection(); return; }
+          if (e.key === 'Tab' || (e.key === 'Enter' && autocompleteSelectedIndex >= 0)) { e.preventDefault(); applyAutocompleteSuggestion(autocompleteSelectedIndex); return; }
+          if (e.key === 'Escape') { hideAutocomplete(); return; }
         }
-
-        if (e.key === 'Enter') {
-          hideAutocomplete();
-          submitFormula();
-        }
+        if (e.key === 'Enter') { hideAutocomplete(); submitFormula(); }
       });
-
-      input.addEventListener('input', () => {
-        clearTimeout(autocompleteDebounceTimer);
-        autocompleteDebounceTimer = setTimeout(() => {
-          fetchAutocompleteSuggestions(input.value);
-        }, 100);
-      });
-
-      input.addEventListener('blur', () => {
-        setTimeout(hideAutocomplete, 150);
-      });
-
-      input.addEventListener('focus', () => {
-        if (input.value.startsWith('=')) {
-          fetchAutocompleteSuggestions(input.value);
-        }
-      });
-
-      document.addEventListener('click', (e) => {
-        if (!e.target.closest('.autocomplete-container')) {
-          hideAutocomplete();
-        }
-      });
+      input.addEventListener('input', () => { clearTimeout(autocompleteDebounceTimer); autocompleteDebounceTimer = setTimeout(() => fetchAutocompleteSuggestions(input.value), 100); });
+      input.addEventListener('blur', () => setTimeout(hideAutocomplete, 150));
+      input.addEventListener('focus', () => { if (input.value.startsWith('=')) fetchAutocompleteSuggestions(input.value); });
+      document.addEventListener('click', e => { if (!e.target.closest('.autocomplete-container')) hideAutocomplete(); });
     }
 
-    // Point Mode: Click cells to insert references while editing formulas
     function setupPointMode() {
-      const input = document.getElementById('formula-input');
-
-      // Enter point mode when typing a formula
-      input.addEventListener('input', () => {
-        updatePointMode();
-      });
-
-      input.addEventListener('focus', () => {
-        updatePointMode();
-      });
-
-      input.addEventListener('blur', () => {
-        // Small delay to allow click events to fire first
-        setTimeout(() => {
-          exitPointMode();
-        }, 100);
-      });
+      const input = $('formula-input');
+      input.addEventListener('input', updatePointMode);
+      input.addEventListener('focus', updatePointMode);
+      input.addEventListener('blur', () => setTimeout(exitPointMode, 100));
     }
 
     function updatePointMode() {
-      const input = document.getElementById('formula-input');
-      const value = input.value;
-      const wasInPointMode = isInPointMode;
-
-      // Enter point mode if:
-      // 1. Input starts with = (is a formula)
-      // 2. Input is focused
-      isInPointMode = value.startsWith('=') && document.activeElement === input;
-
-      if (isInPointMode !== wasInPointMode) {
-        if (isInPointMode) {
-          enterPointMode();
-        } else {
-          exitPointMode();
-        }
-      }
-
-      // Update formula reference highlighting
-      if (isInPointMode) {
-        highlightFormulaReferences(value);
-      }
+      const input = $('formula-input'), val = input.value, was = isInPointMode;
+      isInPointMode = val.startsWith('=') && document.activeElement === input;
+      if (isInPointMode !== was) isInPointMode ? enterPointMode() : exitPointMode();
+      if (isInPointMode) highlightFormulaReferences(val);
     }
 
     function enterPointMode() {
-      isInPointMode = true;
-      pointModeRangeStart = null;
-
-      // Add visual indicator to formula bar
+      isInPointMode = true; pointModeRangeStart = null;
       document.querySelector('.formula-bar').classList.add('point-mode');
-
-      // Mark all cells as clickable (except current cell)
-      document.querySelectorAll('.cell:not(.header):not(.row-header)').forEach(cell => {
-        const row = parseInt(cell.dataset.row);
-        const col = parseInt(cell.dataset.col);
-
+      $$('.cell:not(.header):not(.row-header)').forEach(cell => {
         cell.classList.add('point-mode');
-
-        // Mark the cell being edited as self-ref (can't click it)
-        if (row === selectedCell.row && col === selectedCell.col) {
-          cell.classList.add('self-ref');
-        }
+        if (+cell.dataset.row === selectedCell.row && +cell.dataset.col === selectedCell.col) cell.classList.add('self-ref');
       });
     }
 
     function exitPointMode() {
-      isInPointMode = false;
-      pointModeRangeStart = null;
-      pointModeNavPosition = null;
-
-      // Remove visual indicators
+      isInPointMode = false; pointModeRangeStart = null; pointModeNavPosition = null;
       document.querySelector('.formula-bar').classList.remove('point-mode');
-      document.querySelectorAll('.cell.point-mode').forEach(cell => {
-        cell.classList.remove('point-mode', 'self-ref', 'range-start');
-      });
+      $$('.cell.point-mode').forEach(c => c.classList.remove('point-mode', 'self-ref', 'range-start'));
       clearFormulaRefHighlights();
     }
 
-    function insertCellReference(row, col, isShiftClick = false) {
-      const input = document.getElementById('formula-input');
-      const ref = colToLetter(col) + row;
-
-      // Handle shift+click for range selection
-      if (isShiftClick && pointModeRangeStart) {
-        const startRef = colToLetter(pointModeRangeStart.col) + pointModeRangeStart.row;
-        const rangeRef = `${startRef}:${ref}`;
-
-        // Remove the previous single ref and insert range
-        insertAtCursor(input, rangeRef, true);
+    function insertCellReference(row, col, isShift = false) {
+      const input = $('formula-input'), ref = colToLetter(col) + row;
+      if (isShift && pointModeRangeStart) {
+        insertAtCursor(input, `${colToLetter(pointModeRangeStart.col)}${pointModeRangeStart.row}:${ref}`, true);
         pointModeRangeStart = null;
-
-        // Clear range start visual
-        document.querySelectorAll('.cell.range-start').forEach(c => c.classList.remove('range-start'));
+        $$('.cell.range-start').forEach(c => c.classList.remove('range-start'));
       } else {
-        // Single cell reference
         insertAtCursor(input, ref, false);
-
-        // Set as potential range start for next shift+click
         pointModeRangeStart = { row, col };
-
-        // Visual indicator for range start
-        document.querySelectorAll('.cell.range-start').forEach(c => c.classList.remove('range-start'));
-        const cellEl = getCellElement(row, col);
-        if (cellEl) {
-          cellEl.classList.add('range-start');
-        }
+        $$('.cell.range-start').forEach(c => c.classList.remove('range-start'));
+        const el = getCellElement(row, col); if (el) el.classList.add('range-start');
       }
-
-      // Keep focus on input and update highlighting
-      input.focus();
-      highlightFormulaReferences(input.value);
+      input.focus(); highlightFormulaReferences(input.value);
     }
 
     function insertAtCursor(input, text, replaceLastRef) {
-      const start = input.selectionStart;
-      const end = input.selectionEnd;
-      const value = input.value;
-
-      let newValue;
-      let newCursorPos;
-
+      const start = input.selectionStart, end = input.selectionEnd, val = input.value;
+      let newVal, pos;
       if (replaceLastRef) {
-        // Replace the last cell reference (for range completion)
-        // Find the last token that looks like a cell ref
-        const beforeCursor = value.substring(0, start);
-        const afterCursor = value.substring(end);
-
-        // Find where the last token starts
-        const delimiters = '(),+-*/^&=<>: ';
-        let lastDelimIdx = -1;
-        for (let i = beforeCursor.length - 1; i >= 0; i--) {
-          if (delimiters.includes(beforeCursor[i])) {
-            lastDelimIdx = i;
-            break;
-          }
-        }
-
-        newValue = beforeCursor.substring(0, lastDelimIdx + 1) + text + afterCursor;
-        newCursorPos = lastDelimIdx + 1 + text.length;
+        const before = val.substring(0, start), after = val.substring(end), idx = findLastDelim(before);
+        newVal = before.substring(0, idx + 1) + text + after; pos = idx + 1 + text.length;
+      } else if (start !== end) {
+        newVal = val.substring(0, start) + text + val.substring(end); pos = start + text.length;
       } else {
-        // Check if we should add the reference or replace selection
-        if (start !== end) {
-          // Replace selection
-          newValue = value.substring(0, start) + text + value.substring(end);
-          newCursorPos = start + text.length;
-        } else {
-          // Check what's before cursor - if we're in the middle of typing, replace
-          const beforeCursor = value.substring(0, start);
-          const afterCursor = value.substring(start);
-
-          // Check if cursor is at a delimiter or start of input
-          const delimiters = '(),+-*/^&=<>: ';
-          const lastChar = beforeCursor.length > 0 ? beforeCursor[beforeCursor.length - 1] : '=';
-
-          if (delimiters.includes(lastChar)) {
-            // Insert at cursor position
-            newValue = beforeCursor + text + afterCursor;
-            newCursorPos = start + text.length;
-          } else {
-            // We're in the middle of a token, replace it
-            let tokenStart = beforeCursor.length;
-            for (let i = beforeCursor.length - 1; i >= 0; i--) {
-              if (delimiters.includes(beforeCursor[i])) {
-                tokenStart = i + 1;
-                break;
-              }
-              if (i === 0) tokenStart = 0;
-            }
-
-            // Find token end
-            let tokenEnd = start;
-            for (let i = 0; i < afterCursor.length; i++) {
-              if (delimiters.includes(afterCursor[i])) {
-                break;
-              }
-              tokenEnd++;
-            }
-
-            newValue = value.substring(0, tokenStart) + text + value.substring(tokenEnd);
-            newCursorPos = tokenStart + text.length;
-          }
+        const before = val.substring(0, start), after = val.substring(start);
+        const lastChar = before.length > 0 ? before[before.length - 1] : '=';
+        if (DELIM.includes(lastChar)) { newVal = before + text + after; pos = start + text.length; }
+        else {
+          let ts = before.length; for (let i = before.length - 1; i >= 0; i--) { if (DELIM.includes(before[i])) { ts = i + 1; break; } if (i === 0) ts = 0; }
+          let te = start; for (let i = 0; i < after.length; i++) { if (DELIM.includes(after[i])) break; te++; }
+          newVal = val.substring(0, ts) + text + val.substring(te); pos = ts + text.length;
         }
       }
-
-      input.value = newValue;
-      input.setSelectionRange(newCursorPos, newCursorPos);
+      input.value = newVal; input.setSelectionRange(pos, pos);
     }
 
     function highlightFormulaReferences(formula) {
       clearFormulaRefHighlights();
-
       if (!formula.startsWith('=')) return;
-
-      // Extract cell references from formula
-      const refs = extractRefsFromFormula(formula);
-
-      refs.forEach(ref => {
-        if (ref.type === 'single') {
-          const cellEl = getCellElement(ref.row, ref.col);
-          if (cellEl) {
-            cellEl.classList.add('formula-ref');
-          }
-        } else if (ref.type === 'range') {
-          // Highlight all cells in range
-          for (let r = ref.startRow; r <= ref.endRow; r++) {
-            for (let c = ref.startCol; c <= ref.endCol; c++) {
-              const cellEl = getCellElement(r, c);
-              if (cellEl) {
-                cellEl.classList.add('formula-ref', 'formula-ref-range');
-              }
-            }
-          }
-        }
+      extractRefsFromFormula(formula).forEach(ref => {
+        if (ref.type === 'single') { const el = getCellElement(ref.row, ref.col); if (el) el.classList.add('formula-ref'); }
+        else for (let r = ref.startRow; r <= ref.endRow; r++) for (let c = ref.startCol; c <= ref.endCol; c++) { const el = getCellElement(r, c); if (el) el.classList.add('formula-ref', 'formula-ref-range'); }
       });
     }
 
     function extractRefsFromFormula(formula) {
       const refs = [];
-      const delimiters = '(),+-*/^&=<>: ';
-
-      // Tokenize
-      const tokens = [];
-      let current = '';
-      for (const char of formula) {
-        if (delimiters.includes(char)) {
-          if (current) tokens.push(current);
-          current = '';
-        } else {
-          current += char;
-        }
-      }
-      if (current) tokens.push(current);
-
-      // Parse tokens
-      tokens.forEach(token => {
-        const upperToken = token.toUpperCase();
-
-        if (upperToken.includes(':')) {
-          // Range reference like A1:B5
-          const parts = upperToken.split(':');
-          if (parts.length === 2) {
-            const start = parseRef(parts[0]);
-            const end = parseRef(parts[1]);
-            if (start && end) {
-              refs.push({
-                type: 'range',
-                startRow: Math.min(start.row, end.row),
-                startCol: Math.min(start.col, end.col),
-                endRow: Math.max(start.row, end.row),
-                endCol: Math.max(start.col, end.col)
-              });
-            }
-          }
-        } else {
-          // Single cell reference like A1
-          const parsed = parseRef(upperToken);
-          if (parsed) {
-            refs.push({ type: 'single', ...parsed });
-          }
-        }
+      tokenize(formula).forEach(token => {
+        const upper = token.toUpperCase();
+        if (upper.includes(':')) {
+          const [a, b] = upper.split(':'), s = parseRef(a), e = parseRef(b);
+          if (s && e) refs.push({ type: 'range', ...normalizeBounds(s.row, s.col, e.row, e.col) });
+        } else { const p = parseRef(upper); if (p) refs.push({ type: 'single', ...p }); }
       });
-
       return refs;
     }
 
-    function parseRef(ref) {
-      const match = ref.match(/^([A-Z]+)(\d+)$/);
-      if (!match) return null;
-
-      const colStr = match[1];
-      const rowStr = match[2];
-
-      // Convert column letters to number
-      let col = 0;
-      for (let i = 0; i < colStr.length; i++) {
-        col = col * 26 + (colStr.charCodeAt(i) - 64);
-      }
-
-      const row = parseInt(rowStr);
-
-      if (row > 0 && row <= ROWS && col > 0 && col <= COLS) {
-        return { row, col };
-      }
-      return null;
-    }
-
-    function clearFormulaRefHighlights() {
-      document.querySelectorAll('.cell.formula-ref, .cell.formula-ref-range').forEach(cell => {
-        cell.classList.remove('formula-ref', 'formula-ref-range');
-      });
-    }
-
-    // ========================================
-    // Clipboard & Cell Moving Functions
-    // ========================================
-
-    function setupClipboard() {
-      // Keyboard shortcuts for cut/copy/paste/delete
-      document.addEventListener('keydown', handleClipboardKeydown);
-    }
+    function clearFormulaRefHighlights() { $$('.cell.formula-ref, .cell.formula-ref-range').forEach(c => c.classList.remove('formula-ref', 'formula-ref-range')); }
 
     function handleClipboardKeydown(e) {
-      // Only handle when not in formula input or in point mode
-      if (document.activeElement.id === 'formula-input') {
-        return;
-      }
+      if (document.activeElement.id === 'formula-input') return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key === 'x') { e.preventDefault(); cutSelectedCells(); }
+      else if (mod && e.key === 'c') { e.preventDefault(); copySelectedCells(); }
+      else if (mod && e.key === 'v') { e.preventDefault(); pasteClipboard(); }
+      else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); clearSelectedCells(); }
+    }
 
-      // Ctrl/Cmd + X = Cut
-      if ((e.ctrlKey || e.metaKey) && e.key === 'x') {
-        e.preventDefault();
-        cutSelectedCells();
-        return;
-      }
-
-      // Ctrl/Cmd + C = Copy
-      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-        e.preventDefault();
-        copySelectedCells();
-        return;
-      }
-
-      // Ctrl/Cmd + V = Paste
-      if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
-        e.preventDefault();
-        pasteClipboard();
-        return;
-      }
-
-      // Delete or Backspace = Clear cells
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        e.preventDefault();
-        clearSelectedCells();
-        return;
-      }
+    function getCellDataForClipboard(row, col) {
+      const d = cells[`${row},${col}`] || {};
+      return { row, col, value: d.formula || d.display || '', formula: d.formula || null };
     }
 
     function cutSelectedCells() {
-      const selectedCells = getSelectedCells();
-      if (selectedCells.length === 0) return;
-
-      // Store cell data in clipboard
-      clipboard = {
-        cells: selectedCells.map(({ row, col }) => {
-          const key = `${row},${col}`;
-          const cellData = cells[key] || {};
-          return {
-            row,
-            col,
-            value: cellData.formula || cellData.display || '',
-            formula: cellData.formula || null
-          };
-        }),
-        mode: 'cut',
-        sourceRange: getSelectionBounds()
-      };
-
-      // Visual feedback - mark cells as cut
+      const sel = getSelectedCells(); if (!sel.length) return;
+      clipboard = { cells: sel.map(({ row, col }) => getCellDataForClipboard(row, col)), mode: 'cut', sourceRange: getSelectionBounds() };
       clearClipboardVisuals();
-      selectedCells.forEach(({ row, col }) => {
-        const cellEl = getCellElement(row, col);
-        if (cellEl) {
-          cellEl.classList.add('cut-source');
-        }
-      });
-
-      updateClipboardIndicator();
+      sel.forEach(({ row, col }) => { const el = getCellElement(row, col); if (el) el.classList.add('cut-source'); });
     }
 
     function copySelectedCells() {
-      const selectedCells = getSelectedCells();
-      if (selectedCells.length === 0) return;
-
-      // Store cell data in clipboard
-      clipboard = {
-        cells: selectedCells.map(({ row, col }) => {
-          const key = `${row},${col}`;
-          const cellData = cells[key] || {};
-          return {
-            row,
-            col,
-            value: cellData.formula || cellData.display || '',
-            formula: cellData.formula || null
-          };
-        }),
-        mode: 'copy',
-        sourceRange: getSelectionBounds()
-      };
-
-      // Visual feedback - mark cells as copied
+      const sel = getSelectedCells(); if (!sel.length) return;
+      clipboard = { cells: sel.map(({ row, col }) => getCellDataForClipboard(row, col)), mode: 'copy', sourceRange: getSelectionBounds() };
       clearClipboardVisuals();
-      selectedCells.forEach(({ row, col }) => {
-        const cellEl = getCellElement(row, col);
-        if (cellEl) {
-          cellEl.classList.add('copy-source');
-        }
-      });
-
-      updateClipboardIndicator();
+      sel.forEach(({ row, col }) => { const el = getCellElement(row, col); if (el) el.classList.add('copy-source'); });
     }
 
     async function pasteClipboard() {
-      if (!clipboard || clipboard.cells.length === 0) return;
-
-      const { startRow: srcStartRow, startCol: srcStartCol } = clipboard.sourceRange;
-      const { row: destRow, col: destCol } = selectedCell;
-
-      // Calculate offset from source to destination
-      const rowOffset = destRow - srcStartRow;
-      const colOffset = destCol - srcStartCol;
-
+      if (!clipboard?.cells.length) return;
+      const { startRow: sr, startCol: sc } = clipboard.sourceRange;
+      const ro = selectedCell.row - sr, co = selectedCell.col - sc;
       showLoading();
-
       try {
-        // Process each cell in the clipboard
-        for (const cellData of clipboard.cells) {
-          const newRow = cellData.row + rowOffset;
-          const newCol = cellData.col + colOffset;
-
-          // Skip if destination is out of bounds
-          if (newRow < 1 || newRow > ROWS || newCol < 1 || newCol > COLS) {
-            continue;
+        for (const d of clipboard.cells) {
+          const nr = d.row + ro, nc = d.col + co;
+          if (nr >= 1 && nr <= ROWS && nc >= 1 && nc <= COLS) {
+            await updateCellOnServer(nr, nc, clipboard.mode === 'copy' && d.formula ? adjustFormulaReferences(d.formula, ro, co) : d.value);
           }
-
-          let valueToSet = cellData.value;
-
-          // For copy mode, adjust relative references in formulas
-          if (clipboard.mode === 'copy' && cellData.formula) {
-            valueToSet = adjustFormulaReferences(cellData.formula, rowOffset, colOffset);
-          }
-
-          // Send update to server
-          await updateCellOnServer(newRow, newCol, valueToSet);
         }
-
-        // If cut mode, clear the source cells
         if (clipboard.mode === 'cut') {
-          for (const cellData of clipboard.cells) {
-            // Don't clear if source and dest overlap
-            const destRow = cellData.row + rowOffset;
-            const destCol = cellData.col + colOffset;
-            if (cellData.row !== destRow || cellData.col !== destCol) {
-              await updateCellOnServer(cellData.row, cellData.col, '');
-            }
-          }
-          // Clear clipboard after cut-paste
+          for (const d of clipboard.cells) if (d.row !== d.row + ro || d.col !== d.col + co) await updateCellOnServer(d.row, d.col, '');
           clipboard = null;
         }
-
-        // Reload grid to show changes
         await loadGrid();
-
-      } catch (error) {
-        console.error('Paste error:', error);
-      }
-
-      hideLoading();
-      clearClipboardVisuals();
-      updateClipboardIndicator();
+      } catch (e) { console.error('Paste error:', e); }
+      hideLoading(); clearClipboardVisuals();
     }
 
     async function clearSelectedCells() {
-      const selectedCells = getSelectedCells();
-      if (selectedCells.length === 0) return;
-
+      const sel = getSelectedCells(); if (!sel.length) return;
       showLoading();
-
-      try {
-        for (const { row, col } of selectedCells) {
-          await updateCellOnServer(row, col, '');
-        }
-        await loadGrid();
-      } catch (error) {
-        console.error('Clear cells error:', error);
-      }
-
+      try { for (const { row, col } of sel) await updateCellOnServer(row, col, ''); await loadGrid(); }
+      catch (e) { console.error('Clear error:', e); }
       hideLoading();
     }
 
     async function updateCellOnServer(row, col, value) {
-      const response = await fetch('/api/cell', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ row, col, value })
-      });
-      return response.json();
+      return (await fetch('/api/cell', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ row, col, value }) })).json();
     }
 
-    function adjustFormulaReferences(formula, rowOffset, colOffset) {
+    function adjustFormulaReferences(formula, ro, co) {
       if (!formula.startsWith('=')) return formula;
-
-      // Tokenize and adjust cell references
-      const delimiters = '(),+-*/^&=<>: ';
-      let result = '';
-      let currentToken = '';
-
-      for (let i = 0; i < formula.length; i++) {
-        const char = formula[i];
-        if (delimiters.includes(char)) {
-          if (currentToken) {
-            result += adjustToken(currentToken, rowOffset, colOffset);
-            currentToken = '';
-          }
-          result += char;
-        } else {
-          currentToken += char;
-        }
+      let result = '', cur = '';
+      for (const c of formula) {
+        if (DELIM.includes(c)) { if (cur) { result += adjustToken(cur, ro, co); cur = ''; } result += c; }
+        else cur += c;
       }
-
-      if (currentToken) {
-        result += adjustToken(currentToken, rowOffset, colOffset);
-      }
-
+      if (cur) result += adjustToken(cur, ro, co);
       return result;
     }
 
-    function adjustToken(token, rowOffset, colOffset) {
-      const upperToken = token.toUpperCase();
-
-      // Check if it's a range (A1:B5)
-      if (upperToken.includes(':')) {
-        const parts = token.split(':');
-        if (parts.length === 2) {
-          const adjusted1 = adjustSingleRef(parts[0], rowOffset, colOffset);
-          const adjusted2 = adjustSingleRef(parts[1], rowOffset, colOffset);
-          if (adjusted1 && adjusted2) {
-            return adjusted1 + ':' + adjusted2;
-          }
-        }
-        return token;
+    function adjustToken(token, ro, co) {
+      const upper = token.toUpperCase();
+      if (upper.includes(':')) {
+        const [a, b] = token.split(':'), adj1 = adjustSingleRef(a, ro, co), adj2 = adjustSingleRef(b, ro, co);
+        return (adj1 && adj2) ? adj1 + ':' + adj2 : token;
       }
-
-      // Single cell reference
-      const adjusted = adjustSingleRef(token, rowOffset, colOffset);
-      return adjusted || token;
+      return adjustSingleRef(token, ro, co) || token;
     }
 
-    function adjustSingleRef(ref, rowOffset, colOffset) {
-      const match = ref.toUpperCase().match(/^([A-Z]+)(\d+)$/);
-      if (!match) return null;
-
-      const colStr = match[1];
-      const rowNum = parseInt(match[2]);
-
-      // Convert column letters to number
-      let col = 0;
-      for (let i = 0; i < colStr.length; i++) {
-        col = col * 26 + (colStr.charCodeAt(i) - 64);
-      }
-
-      // Apply offset
-      const newRow = rowNum + rowOffset;
-      const newCol = col + colOffset;
-
-      // Check bounds
-      if (newRow < 1 || newRow > ROWS || newCol < 1 || newCol > COLS) {
-        return '#REF!';
-      }
-
-      return colToLetter(newCol) + newRow;
+    function adjustSingleRef(ref, ro, co) {
+      const m = ref.toUpperCase().match(/^([A-Z]+)(\d+)$/);
+      if (!m) return null;
+      const nr = parseInt(m[2]) + ro, nc = letterToCol(m[1]) + co;
+      return (nr >= 1 && nr <= ROWS && nc >= 1 && nc <= COLS) ? colToLetter(nc) + nr : '#REF!';
     }
 
     function getSelectionBounds() {
-      if (selectedRange) {
-        return selectedRange;
-      }
-      return {
-        startRow: selectedCell.row,
-        startCol: selectedCell.col,
-        endRow: selectedCell.row,
-        endCol: selectedCell.col
-      };
+      return selectedRange || { startRow: selectedCell.row, startCol: selectedCell.col, endRow: selectedCell.row, endCol: selectedCell.col };
     }
 
-    function clearClipboardVisuals() {
-      document.querySelectorAll('.cell.cut-source, .cell.copy-source, .cell.drag-source, .cell.drop-target').forEach(cell => {
-        cell.classList.remove('cut-source', 'copy-source', 'drag-source', 'drop-target', 'drop-target-invalid');
-      });
-    }
-
-    function updateClipboardIndicator() {
-      // The indicator is shown in footer - we'll just log for now
-      // Could add a visual indicator element if needed
-    }
-
-    // ========================================
-    // Drag-to-Move Functions
-    // ========================================
+    function clearClipboardVisuals() { $$('.cell.cut-source, .cell.copy-source, .cell.drag-source, .cell.drop-target').forEach(c => c.classList.remove('cut-source', 'copy-source', 'drag-source', 'drop-target', 'drop-target-invalid')); }
 
     function startDragToMove(e, row, col) {
-      // Only start drag-to-move if we're clicking on a selected cell
-      const isInSelection = isCoordInSelection(row, col);
-      if (!isInSelection) return false;
-
-      isDragToMove = true;
-      dragMoveStart = { row, col };
-
-      // Mark source cells
-      const selectedCells = getSelectedCells();
-      selectedCells.forEach(({ row, col }) => {
-        const cellEl = getCellElement(row, col);
-        if (cellEl) {
-          cellEl.classList.add('drag-source');
-        }
-      });
-
+      if (!isCoordInSelection(row, col)) return false;
+      isDragToMove = true; dragMoveStart = { row, col };
+      getSelectedCells().forEach(({ row, col }) => { const el = getCellElement(row, col); if (el) el.classList.add('drag-source'); });
       return true;
     }
 
     function updateDragToMoveTarget(row, col) {
       if (!isDragToMove) return;
-
-      // Clear previous drop target visuals
-      document.querySelectorAll('.cell.drop-target, .cell.drop-target-invalid').forEach(cell => {
-        cell.classList.remove('drop-target', 'drop-target-invalid');
-      });
-
-      // Calculate where the selection would land
-      const bounds = getSelectionBounds();
-      const rowOffset = row - dragMoveStart.row;
-      const colOffset = col - dragMoveStart.col;
-
-      const newStartRow = bounds.startRow + rowOffset;
-      const newStartCol = bounds.startCol + colOffset;
-      const newEndRow = bounds.endRow + rowOffset;
-      const newEndCol = bounds.endCol + colOffset;
-
-      // Check if destination is valid
-      const isValid = newStartRow >= 1 && newEndRow <= ROWS &&
-                      newStartCol >= 1 && newEndCol <= COLS;
-
-      // Highlight destination cells
-      for (let r = newStartRow; r <= newEndRow; r++) {
-        for (let c = newStartCol; c <= newEndCol; c++) {
-          const cellEl = getCellElement(r, c);
-          if (cellEl) {
-            cellEl.classList.add(isValid ? 'drop-target' : 'drop-target-invalid');
-          }
-        }
-      }
+      $$('.cell.drop-target, .cell.drop-target-invalid').forEach(c => c.classList.remove('drop-target', 'drop-target-invalid'));
+      const b = getSelectionBounds(), ro = row - dragMoveStart.row, co = col - dragMoveStart.col;
+      const ns = b.startRow + ro, nc = b.startCol + co, ne = b.endRow + ro, nce = b.endCol + co;
+      const valid = ns >= 1 && ne <= ROWS && nc >= 1 && nce <= COLS;
+      for (let r = ns; r <= ne; r++) for (let c = nc; c <= nce; c++) { const el = getCellElement(r, c); if (el) el.classList.add(valid ? 'drop-target' : 'drop-target-invalid'); }
     }
 
     async function completeDragToMove(row, col) {
       if (!isDragToMove) return;
-
       isDragToMove = false;
-
-      // Calculate offset
-      const bounds = getSelectionBounds();
-      const rowOffset = row - dragMoveStart.row;
-      const colOffset = col - dragMoveStart.col;
-
-      // If no movement, just clean up
-      if (rowOffset === 0 && colOffset === 0) {
-        clearClipboardVisuals();
-        dragMoveStart = null;
-        return;
-      }
-
-      // Check if destination is valid
-      const newStartRow = bounds.startRow + rowOffset;
-      const newStartCol = bounds.startCol + colOffset;
-      const newEndRow = bounds.endRow + rowOffset;
-      const newEndCol = bounds.endCol + colOffset;
-
-      if (newStartRow < 1 || newEndRow > ROWS || newStartCol < 1 || newEndCol > COLS) {
-        clearClipboardVisuals();
-        dragMoveStart = null;
-        return;
-      }
-
+      const b = getSelectionBounds(), ro = row - dragMoveStart.row, co = col - dragMoveStart.col;
+      if (ro === 0 && co === 0) { clearClipboardVisuals(); dragMoveStart = null; return; }
+      const ns = b.startRow + ro, nc = b.startCol + co, ne = b.endRow + ro, nce = b.endCol + co;
+      if (ns < 1 || ne > ROWS || nc < 1 || nce > COLS) { clearClipboardVisuals(); dragMoveStart = null; return; }
       showLoading();
-
       try {
-        // Get all cells to move
-        const selectedCells = getSelectedCells();
-        const cellsToMove = selectedCells.map(({ row, col }) => {
-          const key = `${row},${col}`;
-          const cellData = cells[key] || {};
-          return {
-            row,
-            col,
-            value: cellData.formula || cellData.display || '',
-            formula: cellData.formula || null
-          };
-        });
-
-        // First, set all destination cells
-        for (const cellData of cellsToMove) {
-          const newRow = cellData.row + rowOffset;
-          const newCol = cellData.col + colOffset;
-          await updateCellOnServer(newRow, newCol, cellData.value);
-        }
-
-        // Then, clear source cells (only those not overlapping with destination)
-        for (const cellData of cellsToMove) {
-          const destRow = cellData.row + rowOffset;
-          const destCol = cellData.col + colOffset;
-
-          // Check if this source cell is NOT a destination cell
-          const isDestination = cellsToMove.some(c =>
-            c.row + rowOffset === cellData.row && c.col + colOffset === cellData.col
-          );
-
-          if (!isDestination) {
-            await updateCellOnServer(cellData.row, cellData.col, '');
-          }
-        }
-
-        // Reload grid
+        const toMove = getSelectedCells().map(({ row, col }) => getCellDataForClipboard(row, col));
+        for (const d of toMove) await updateCellOnServer(d.row + ro, d.col + co, d.value);
+        for (const d of toMove) if (!toMove.some(c => c.row + ro === d.row && c.col + co === d.col)) await updateCellOnServer(d.row, d.col, '');
         await loadGrid();
-
-        // Update selection to new location
-        selectCell(selectedCell.row + rowOffset, selectedCell.col + colOffset);
-
-      } catch (error) {
-        console.error('Drag-to-move error:', error);
-      }
-
-      hideLoading();
-      clearClipboardVisuals();
-      dragMoveStart = null;
+        selectCell(selectedCell.row + ro, selectedCell.col + co);
+      } catch (e) { console.error('Drag error:', e); }
+      hideLoading(); clearClipboardVisuals(); dragMoveStart = null;
     }
 
     function isCoordInSelection(row, col) {
-      if (selectedRange) {
-        return row >= selectedRange.startRow && row <= selectedRange.endRow &&
-               col >= selectedRange.startCol && col <= selectedRange.endCol;
-      }
+      if (selectedRange) return row >= selectedRange.startRow && row <= selectedRange.endRow && col >= selectedRange.startCol && col <= selectedRange.endCol;
       return row === selectedCell.row && col === selectedCell.col;
     }
 
     async function fetchAutocompleteSuggestions(input) {
-      if (!input.startsWith('=')) {
-        hideAutocomplete();
-        return;
-      }
-
+      if (!input.startsWith('=')) { hideAutocomplete(); return; }
       try {
-        const response = await fetch(`/api/autocomplete?input=${encodeURIComponent(input)}`);
-        const data = await response.json();
+        const data = await (await fetch(`/api/autocomplete?input=${encodeURIComponent(input)}`)).json();
         autocompleteSuggestions = data.suggestions || [];
         autocompleteSelectedIndex = autocompleteSuggestions.length > 0 ? 0 : -1;
         renderAutocompleteDropdown();
-      } catch (error) {
-        console.error('Autocomplete error:', error);
-        hideAutocomplete();
-      }
+      } catch (e) { console.error('Autocomplete error:', e); hideAutocomplete(); }
     }
 
     function renderAutocompleteDropdown() {
-      const dropdown = document.getElementById('autocomplete-dropdown');
-
-      if (autocompleteSuggestions.length === 0) {
-        dropdown.innerHTML = '<div class="autocomplete-hint">Type function names (SUM, IF, AVERAGE) or cell references (A1, B2)</div>';
-        dropdown.classList.add('active');
-        return;
-      }
-
-      let html = '';
-      autocompleteSuggestions.forEach((suggestion, index) => {
-        const typeClass = suggestion.suggestionType === 'SuggestionFunction' ? 'function' :
-                         suggestion.suggestionType === 'SuggestionCell' ? 'cell' : 'range';
-        const typeLabel = suggestion.suggestionType === 'SuggestionFunction' ? 'fn' :
-                         suggestion.suggestionType === 'SuggestionCell' ? 'cell' : 'range';
-        const selected = index === autocompleteSelectedIndex ? 'selected' : '';
-
-        html += `
-          <div class="autocomplete-item ${selected}" data-index="${index}" onclick="applyAutocompleteSuggestion(${index})">
-            <div class="autocomplete-main">
-              <span class="autocomplete-text">${escapeHtml(suggestion.suggestionDisplay)}</span>
-              <span class="autocomplete-type ${typeClass}">${typeLabel}</span>
-            </div>
-            <div class="autocomplete-desc">${escapeHtml(suggestion.suggestionDescription)}</div>
-          </div>
-        `;
-      });
-
-      html += '<div class="autocomplete-hint">Tab or Enter to select, Esc to close</div>';
-      dropdown.innerHTML = html;
+      const dropdown = $('autocomplete-dropdown');
+      if (!autocompleteSuggestions.length) { dropdown.innerHTML = '<div class="autocomplete-hint">Type function names (SUM, IF, AVERAGE) or cell references (A1, B2)</div>'; dropdown.classList.add('active'); return; }
+      dropdown.innerHTML = autocompleteSuggestions.map((s, i) => {
+        const tc = s.suggestionType === 'SuggestionFunction' ? 'function' : s.suggestionType === 'SuggestionCell' ? 'cell' : 'range';
+        const tl = s.suggestionType === 'SuggestionFunction' ? 'fn' : s.suggestionType === 'SuggestionCell' ? 'cell' : 'range';
+        return `<div class="autocomplete-item${i === autocompleteSelectedIndex ? ' selected' : ''}" onclick="applyAutocompleteSuggestion(${i})"><div class="autocomplete-main"><span class="autocomplete-text">${escapeHtml(s.suggestionDisplay)}</span><span class="autocomplete-type ${tc}">${tl}</span></div><div class="autocomplete-desc">${escapeHtml(s.suggestionDescription)}</div></div>`;
+      }).join('') + '<div class="autocomplete-hint">Tab or Enter to select, Esc to close</div>';
       dropdown.classList.add('active');
     }
 
     function updateAutocompleteSelection() {
-      const items = document.querySelectorAll('.autocomplete-item');
-      items.forEach((item, index) => {
-        if (index === autocompleteSelectedIndex) {
-          item.classList.add('selected');
-          item.scrollIntoView({ block: 'nearest' });
-        } else {
-          item.classList.remove('selected');
-        }
-      });
+      $$('.autocomplete-item').forEach((el, i) => { el.classList.toggle('selected', i === autocompleteSelectedIndex); if (i === autocompleteSelectedIndex) el.scrollIntoView({ block: 'nearest' }); });
     }
 
-    function applyAutocompleteSuggestion(index) {
-      if (index < 0 || index >= autocompleteSuggestions.length) return;
-
-      const suggestion = autocompleteSuggestions[index];
-      const input = document.getElementById('formula-input');
-      const currentValue = input.value;
-
-      const newValue = replaceLastToken(currentValue, suggestion.suggestionInsert);
-      input.value = newValue;
-      input.focus();
-
-      hideAutocomplete();
-
-      if (suggestion.suggestionType === 'SuggestionFunction') {
-        setTimeout(() => fetchAutocompleteSuggestions(input.value), 50);
-      }
+    function applyAutocompleteSuggestion(i) {
+      if (i < 0 || i >= autocompleteSuggestions.length) return;
+      const s = autocompleteSuggestions[i], input = $('formula-input');
+      const idx = findLastDelim(input.value);
+      input.value = (idx === -1 ? '' : input.value.substring(0, idx + 1)) + s.suggestionInsert;
+      input.focus(); hideAutocomplete();
+      if (s.suggestionType === 'SuggestionFunction') setTimeout(() => fetchAutocompleteSuggestions(input.value), 50);
     }
 
-    function replaceLastToken(input, replacement) {
-      const delimiters = '(),+-*/^&=<>: ';
-      let lastDelimiterIndex = -1;
-
-      for (let i = input.length - 1; i >= 0; i--) {
-        if (delimiters.includes(input[i])) {
-          lastDelimiterIndex = i;
-          break;
-        }
-      }
-
-      if (lastDelimiterIndex === -1) {
-        return replacement;
-      }
-
-      return input.substring(0, lastDelimiterIndex + 1) + replacement;
-    }
-
-    function hideAutocomplete() {
-      const dropdown = document.getElementById('autocomplete-dropdown');
-      dropdown.classList.remove('active');
-      autocompleteSelectedIndex = -1;
-      autocompleteSuggestions = [];
-    }
-
-    function escapeHtml(text) {
-      const div = document.createElement('div');
-      div.textContent = text;
-      return div.innerHTML;
-    }
+    function hideAutocomplete() { $('autocomplete-dropdown').classList.remove('active'); autocompleteSelectedIndex = -1; autocompleteSuggestions = []; }
+    function escapeHtml(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
 
     function renderGrid() {
-      const spreadsheet = document.getElementById('spreadsheet');
-
-      // Clear existing data rows (keep headers)
-      const existingCells = spreadsheet.querySelectorAll('.cell:not(.header)');
-      existingCells.forEach(cell => {
-        if (!cell.classList.contains('header')) {
-          cell.remove();
-        }
-      });
-
-      // Generate rows
+      const sheet = $('spreadsheet');
+      $$('.cell:not(.header)').forEach(c => { if (!c.classList.contains('header')) c.remove(); });
       for (let row = 1; row <= ROWS; row++) {
-        // Row header
-        const rowHeader = document.createElement('div');
-        rowHeader.className = 'cell row-header';
-        rowHeader.textContent = row;
-        spreadsheet.appendChild(rowHeader);
-
-        // Data cells
+        const rh = document.createElement('div'); rh.className = 'cell row-header'; rh.textContent = row; sheet.appendChild(rh);
         for (let col = 1; col <= COLS; col++) {
-          const cell = document.createElement('div');
-          cell.className = 'cell';
-          cell.dataset.row = row;
-          cell.dataset.col = col;
-          cell.onmousedown = (e) => handleCellMouseDown(e, row, col);
-          cell.onmouseenter = (e) => handleCellMouseEnter(e, row, col);
+          const cell = document.createElement('div'); cell.className = 'cell'; cell.dataset.row = row; cell.dataset.col = col;
+          cell.onmousedown = e => handleCellMouseDown(e, row, col);
+          cell.onmouseenter = e => handleCellMouseEnter(e, row, col);
           cell.ondblclick = () => editCell(row, col);
-          spreadsheet.appendChild(cell);
+          sheet.appendChild(cell);
         }
       }
-
-      // Global mouse up to end drag
       document.addEventListener('mouseup', handleMouseUp);
     }
 
     function handleCellMouseDown(e, row, col) {
-      // Prevent text selection during drag
       e.preventDefault();
-
-      // Point mode: clicking cells inserts references into formula
-      if (isInPointMode) {
-        // Don't allow clicking the cell being edited (self-reference)
-        if (row === selectedCell.row && col === selectedCell.col) {
-          return;
-        }
-
-        // Insert cell reference at cursor position
-        insertCellReference(row, col, e.shiftKey);
-        return;
-      }
-
-      // Check if clicking on already selected cells - initiate drag-to-move
-      if (isCoordInSelection(row, col) && !e.shiftKey) {
-        if (startDragToMove(e, row, col)) {
-          isDragging = true;
-          dragStart = { row, col };
-          dragEnd = { row, col };
-          return;
-        }
-      }
-
-      // Clear any existing clipboard visuals when starting new selection
+      if (isInPointMode) { if (row !== selectedCell.row || col !== selectedCell.col) insertCellReference(row, col, e.shiftKey); return; }
+      if (isCoordInSelection(row, col) && !e.shiftKey && startDragToMove(e, row, col)) { isDragging = true; dragStart = dragEnd = { row, col }; return; }
       clearClipboardVisuals();
-
-      isDragging = true;
-      dragStart = { row, col };
-      dragEnd = { row, col };
-      selectedRange = null;
-
+      isDragging = true; dragStart = dragEnd = { row, col }; selectedRange = null;
       selectCell(row, col);
     }
 
     function handleCellMouseEnter(e, row, col) {
-      // In point mode, drag creates a range reference
-      if (isInPointMode && isDragging && dragStart) {
-        dragEnd = { row, col };
-        updatePointModeRangeVisual();
-        return;
-      }
-
-      // Drag-to-move: update drop target visualization
-      if (isDragToMove && isDragging) {
-        dragEnd = { row, col };
-        updateDragToMoveTarget(row, col);
-        return;
-      }
-
+      if (isInPointMode && isDragging && dragStart) { dragEnd = { row, col }; updatePointModeRangeVisual(); return; }
+      if (isDragToMove && isDragging) { dragEnd = { row, col }; updateDragToMoveTarget(row, col); return; }
       if (!isDragging || !dragStart) return;
-
-      dragEnd = { row, col };
-      updateSelectionVisual();
+      dragEnd = { row, col }; updateSelectionVisual();
     }
 
     function handleMouseUp() {
       if (!isDragging) return;
-
-      // Drag-to-move: complete the move operation
-      if (isDragToMove && dragEnd) {
-        isDragging = false;
-        completeDragToMove(dragEnd.row, dragEnd.col);
-        dragStart = null;
-        dragEnd = null;
-        return;
-      }
-
-      // Point mode: complete range selection on mouse up
+      if (isDragToMove && dragEnd) { isDragging = false; completeDragToMove(dragEnd.row, dragEnd.col); dragStart = dragEnd = null; return; }
       if (isInPointMode && dragStart && dragEnd) {
         isDragging = false;
-
-        const startRow = Math.min(dragStart.row, dragEnd.row);
-        const endRow = Math.max(dragStart.row, dragEnd.row);
-        const startCol = Math.min(dragStart.col, dragEnd.col);
-        const endCol = Math.max(dragStart.col, dragEnd.col);
-
-        // Insert range reference if dragged across multiple cells
-        if (startRow !== endRow || startCol !== endCol) {
-          const rangeRef = `${colToLetter(startCol)}${startRow}:${colToLetter(endCol)}${endRow}`;
-          const input = document.getElementById('formula-input');
-
-          // Replace the single cell ref we inserted on mousedown with the range
-          insertAtCursor(input, rangeRef, true);
-          input.focus();
-          highlightFormulaReferences(input.value);
+        const b = normalizeBounds(dragStart.row, dragStart.col, dragEnd.row, dragEnd.col);
+        if (b.startRow !== b.endRow || b.startCol !== b.endCol) {
+          const input = $('formula-input');
+          insertAtCursor(input, `${colToLetter(b.startCol)}${b.startRow}:${colToLetter(b.endCol)}${b.endRow}`, true);
+          input.focus(); highlightFormulaReferences(input.value);
         }
-
-        // Clear point mode range visuals
-        clearPointModeRangeVisual();
-        dragStart = null;
-        dragEnd = null;
-        return;
+        dragStart = dragEnd = null; return;
       }
-
       isDragging = false;
-
       if (dragStart && dragEnd) {
-        const startRow = Math.min(dragStart.row, dragEnd.row);
-        const endRow = Math.max(dragStart.row, dragEnd.row);
-        const startCol = Math.min(dragStart.col, dragEnd.col);
-        const endCol = Math.max(dragStart.col, dragEnd.col);
-
-        // Only set selectedRange if more than one cell is selected
-        if (startRow !== endRow || startCol !== endCol) {
-          selectedRange = { startRow, startCol, endRow, endCol };
-          updateCellRefDisplay();
-        } else {
-          selectedRange = null;
-        }
+        const b = normalizeBounds(dragStart.row, dragStart.col, dragEnd.row, dragEnd.col);
+        selectedRange = (b.startRow !== b.endRow || b.startCol !== b.endCol) ? b : null;
+        if (selectedRange) updateCellRefDisplay();
       }
     }
 
     function updatePointModeRangeVisual() {
-      // Clear previous visual
-      clearPointModeRangeVisual();
-
+      clearFormulaRefHighlights();
       if (!dragStart || !dragEnd) return;
-
-      const startRow = Math.min(dragStart.row, dragEnd.row);
-      const endRow = Math.max(dragStart.row, dragEnd.row);
-      const startCol = Math.min(dragStart.col, dragEnd.col);
-      const endCol = Math.max(dragStart.col, dragEnd.col);
-
-      // Highlight the range being selected
-      for (let r = startRow; r <= endRow; r++) {
-        for (let c = startCol; c <= endCol; c++) {
-          const cell = getCellElement(r, c);
-          if (cell) {
-            cell.classList.add('formula-ref', 'formula-ref-range');
-          }
-        }
-      }
-    }
-
-    function clearPointModeRangeVisual() {
-      // This is handled by clearFormulaRefHighlights but called separately
-      // to not clear other ref highlights
+      const b = normalizeBounds(dragStart.row, dragStart.col, dragEnd.row, dragEnd.col);
+      for (let r = b.startRow; r <= b.endRow; r++) for (let c = b.startCol; c <= b.endCol; c++) { const el = getCellElement(r, c); if (el) el.classList.add('formula-ref', 'formula-ref-range'); }
     }
 
     function updateSelectionVisual() {
-      // Clear all selection classes
-      document.querySelectorAll('.cell.in-selection, .cell.selection-corner').forEach(c => {
-        c.classList.remove('in-selection', 'selection-corner');
-      });
-
+      $$('.cell.in-selection, .cell.selection-corner').forEach(c => c.classList.remove('in-selection', 'selection-corner'));
       if (!dragStart || !dragEnd) return;
-
-      const startRow = Math.min(dragStart.row, dragEnd.row);
-      const endRow = Math.max(dragStart.row, dragEnd.row);
-      const startCol = Math.min(dragStart.col, dragEnd.col);
-      const endCol = Math.max(dragStart.col, dragEnd.col);
-
-      // Highlight all cells in range
-      for (let r = startRow; r <= endRow; r++) {
-        for (let c = startCol; c <= endCol; c++) {
-          const cell = getCellElement(r, c);
-          if (cell) {
-            cell.classList.add('in-selection');
-          }
-        }
-      }
-
-      // Mark corners for the selection outline
-      const cornerCell = getCellElement(endRow, endCol);
-      if (cornerCell) {
-        cornerCell.classList.add('selection-corner');
-      }
-
-      // Update cell ref to show range
-      if (startRow !== endRow || startCol !== endCol) {
-        const rangeStr = `${colToLetter(startCol)}${startRow}:${colToLetter(endCol)}${endRow}`;
-        document.getElementById('cell-ref').textContent = rangeStr;
-      }
+      const b = normalizeBounds(dragStart.row, dragStart.col, dragEnd.row, dragEnd.col);
+      for (let r = b.startRow; r <= b.endRow; r++) for (let c = b.startCol; c <= b.endCol; c++) { const el = getCellElement(r, c); if (el) el.classList.add('in-selection'); }
+      const corner = getCellElement(b.endRow, b.endCol); if (corner) corner.classList.add('selection-corner');
+      if (b.startRow !== b.endRow || b.startCol !== b.endCol) $('cell-ref').textContent = `${colToLetter(b.startCol)}${b.startRow}:${colToLetter(b.endCol)}${b.endRow}`;
     }
 
     function updateCellRefDisplay() {
-      if (selectedRange) {
-        const { startRow, startCol, endRow, endCol } = selectedRange;
-        const rangeStr = `${colToLetter(startCol)}${startRow}:${colToLetter(endCol)}${endRow}`;
-        document.getElementById('cell-ref').textContent = rangeStr;
-      } else {
-        document.getElementById('cell-ref').textContent = colToLetter(selectedCell.col) + selectedCell.row;
-      }
+      if (selectedRange) $('cell-ref').textContent = `${colToLetter(selectedRange.startCol)}${selectedRange.startRow}:${colToLetter(selectedRange.endCol)}${selectedRange.endRow}`;
+      else $('cell-ref').textContent = colToLetter(selectedCell.col) + selectedCell.row;
     }
 
-    function clearSelectionVisual() {
-      document.querySelectorAll('.cell.in-selection, .cell.selection-corner').forEach(c => {
-        c.classList.remove('in-selection', 'selection-corner');
-      });
-    }
+    function clearSelectionVisual() { $$('.cell.in-selection, .cell.selection-corner').forEach(c => c.classList.remove('in-selection', 'selection-corner')); }
 
     function getSelectedCells() {
-      if (!selectedRange) {
-        return [{ row: selectedCell.row, col: selectedCell.col }];
-      }
-
-      const { startRow, startCol, endRow, endCol } = selectedRange;
-      const result = [];
-      for (let r = startRow; r <= endRow; r++) {
-        for (let c = startCol; c <= endCol; c++) {
-          result.push({ row: r, col: c });
-        }
-      }
-      return result;
-    }
-
-    function colToLetter(col) {
-      let result = '';
-      while (col > 0) {
-        col--;
-        result = String.fromCharCode(65 + (col % 26)) + result;
-        col = Math.floor(col / 26);
-      }
-      return result;
+      if (!selectedRange) return [{ row: selectedCell.row, col: selectedCell.col }];
+      const r = [];
+      for (let row = selectedRange.startRow; row <= selectedRange.endRow; row++) for (let col = selectedRange.startCol; col <= selectedRange.endCol; col++) r.push({ row, col });
+      return r;
     }
 
     function selectCell(row, col, clearRange = true) {
-      // Deselect previous
-      document.querySelectorAll('.cell.selected').forEach(c => c.classList.remove('selected'));
-
-      // Clear range selection if requested
-      if (clearRange) {
-        selectedRange = null;
-        clearSelectionVisual();
-      }
-
-      // Select new
+      $$('.cell.selected').forEach(c => c.classList.remove('selected'));
+      if (clearRange) { selectedRange = null; clearSelectionVisual(); }
       selectedCell = { row, col };
-      const cell = getCellElement(row, col);
-      if (cell) {
-        cell.classList.add('selected');
-      }
-
-      // Update formula bar
-      document.getElementById('cell-ref').textContent = colToLetter(col) + row;
-
-      const cellData = cells[`${row},${col}`];
-      const input = document.getElementById('formula-input');
-      if (cellData && cellData.formula) {
-        input.value = cellData.formula;
-      } else if (cellData && cellData.display) {
-        input.value = cellData.display;
-      } else {
-        input.value = '';
-      }
+      const cell = getCellElement(row, col); if (cell) cell.classList.add('selected');
+      $('cell-ref').textContent = colToLetter(col) + row;
+      const d = cells[`${row},${col}`], input = $('formula-input');
+      input.value = d?.formula || d?.display || '';
       input.focus();
     }
 
-    function editCell(row, col) {
-      selectCell(row, col);
-      document.getElementById('formula-input').select();
-    }
-
-    function getCellElement(row, col) {
-      return document.querySelector(`.cell[data-row="${row}"][data-col="${col}"]`);
-    }
+    function editCell(row, col) { selectCell(row, col); $('formula-input').select(); }
 
     async function submitFormula() {
-      const input = document.getElementById('formula-input');
-      const value = input.value;
-      const { row, col } = selectedCell;
-
+      const input = $('formula-input'), { row, col } = selectedCell;
       showLoading();
-
       try {
-        const response = await fetch('/api/cell', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ row, col, value })
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-          updateGridFromResponse(data);
-        } else {
-          console.error('Error updating cell:', data);
-        }
-      } catch (error) {
-        console.error('Network error:', error);
-      }
-
+        const data = await (await fetch('/api/cell', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ row, col, value: input.value }) })).json();
+        if (data.success) updateGridFromResponse(data);
+      } catch (e) { console.error('Network error:', e); }
       hideLoading();
-
-      // Move to next row
-      if (selectedCell.row < ROWS) {
-        selectCell(selectedCell.row + 1, selectedCell.col);
-      }
+      if (selectedCell.row < ROWS) selectCell(selectedCell.row + 1, selectedCell.col);
     }
 
     async function loadGrid() {
-      try {
-        const response = await fetch('/api/grid');
-        const data = await response.json();
-        updateGridFromResponse(data);
-      } catch (error) {
-        console.error('Error loading grid:', error);
-      }
+      try { updateGridFromResponse(await (await fetch('/api/grid')).json()); }
+      catch (e) { console.error('Load error:', e); }
     }
 
     async function recalculateAll() {
       showLoading();
-
       try {
-        const response = await fetch('/api/recalculate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-          updateGridFromResponse(data);
-          console.log(`Recalculated ${data.recalculated} cells`);
-        }
-      } catch (error) {
-        console.error('Error recalculating:', error);
-      }
-
+        const data = await (await fetch('/api/recalculate', { method: 'POST', headers: { 'Content-Type': 'application/json' } })).json();
+        if (data.success) updateGridFromResponse(data);
+      } catch (e) { console.error('Recalc error:', e); }
       hideLoading();
     }
 
     function updateGridFromResponse(data) {
       if (data.cells) {
         cells = {};
-        for (const [key, cellData] of Object.entries(data.cells)) {
-          cells[key] = cellData;
-          const [row, col] = key.split(',').map(Number);
-          const cellEl = getCellElement(row, col);
-          if (cellEl) {
-            cellEl.textContent = cellData.display || '';
-            cellEl.classList.remove('formula', 'error', 'boolean', 'text');
-            if (cellData.formula) {
-              cellEl.classList.add('formula');
-            }
-            if (cellData.value) {
-              if (cellData.value.tag === 'CellError') {
-                cellEl.classList.add('error');
-              } else if (cellData.value.tag === 'CellBoolean') {
-                cellEl.classList.add('boolean');
-              } else if (cellData.value.tag === 'CellText' && cellData.formula) {
-                cellEl.classList.add('text');
-              }
-            }
+        for (const [key, d] of Object.entries(data.cells)) {
+          cells[key] = d;
+          const [row, col] = key.split(',').map(Number), el = getCellElement(row, col);
+          if (el) {
+            el.textContent = d.display || '';
+            el.classList.remove('formula', 'error', 'boolean', 'text');
+            if (d.formula) el.classList.add('formula');
+            if (d.value?.tag === 'CellError') el.classList.add('error');
+            else if (d.value?.tag === 'CellBoolean') el.classList.add('boolean');
+            else if (d.value?.tag === 'CellText' && d.formula) el.classList.add('text');
           }
         }
       }
-
       if (data.stats) {
-        document.getElementById('stat-ops').textContent = data.stats.statsOperations;
-        document.getElementById('stat-tokens').textContent = '~' + data.stats.statsTokensEstimate;
-        document.getElementById('stat-cost').textContent = '~$' + data.stats.statsCostEstimate.toFixed(2);
+        $('stat-ops').textContent = data.stats.statsOperations;
+        $('stat-tokens').textContent = '~' + data.stats.statsTokensEstimate;
+        $('stat-cost').textContent = '~$' + data.stats.statsCostEstimate.toFixed(2);
       }
     }
 
-    function showLoading() {
-      document.getElementById('loading').classList.add('active');
-    }
+    function showLoading() { $('loading').classList.add('active'); }
+    function hideLoading() { $('loading').classList.remove('active'); }
+    function showAbout() { $('about-modal').classList.add('active'); }
+    function hideAbout() { $('about-modal').classList.remove('active'); }
 
-    function hideLoading() {
-      document.getElementById('loading').classList.remove('active');
-    }
-
-    function showAbout() {
-      document.getElementById('about-modal').classList.add('active');
-    }
-
-    function hideAbout() {
-      document.getElementById('about-modal').classList.remove('active');
-    }
-
-    // Keyboard navigation
-    document.addEventListener('keydown', (e) => {
+    document.addEventListener('keydown', e => {
       if (document.activeElement.id === 'formula-input') {
-        if (e.key === 'Escape') {
-          exitPointMode();
-          document.activeElement.blur();
-        }
-
-        // In point mode, arrow keys can navigate to insert cell refs
-        if (isInPointMode && e.ctrlKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
-          e.preventDefault();
-          navigateAndInsertRef(e.key, e.shiftKey);
-          return;
-        }
-
+        if (e.key === 'Escape') { exitPointMode(); document.activeElement.blur(); }
+        if (isInPointMode && e.ctrlKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) { e.preventDefault(); navigateAndInsertRef(e.key, e.shiftKey); }
         return;
       }
-
       const { row, col } = selectedCell;
-
-      // Shift+Arrow for range selection
-      if (e.shiftKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
-        e.preventDefault();
-        extendSelection(e.key);
-        return;
-      }
-
+      if (e.shiftKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) { e.preventDefault(); extendSelection(e.key); return; }
       switch (e.key) {
-        case 'ArrowUp':
-          if (row > 1) selectCell(row - 1, col);
-          e.preventDefault();
-          break;
-        case 'ArrowDown':
-          if (row < ROWS) selectCell(row + 1, col);
-          e.preventDefault();
-          break;
-        case 'ArrowLeft':
-          if (col > 1) selectCell(row, col - 1);
-          e.preventDefault();
-          break;
-        case 'ArrowRight':
-          if (col < COLS) selectCell(row, col + 1);
-          e.preventDefault();
-          break;
-        case 'Enter':
-          document.getElementById('formula-input').focus();
-          e.preventDefault();
-          break;
-        case 'Escape':
-          // Clear range selection
-          if (selectedRange) {
-            selectedRange = null;
-            clearSelectionVisual();
-            updateCellRefDisplay();
-          }
-          break;
+        case 'ArrowUp': if (row > 1) selectCell(row - 1, col); e.preventDefault(); break;
+        case 'ArrowDown': if (row < ROWS) selectCell(row + 1, col); e.preventDefault(); break;
+        case 'ArrowLeft': if (col > 1) selectCell(row, col - 1); e.preventDefault(); break;
+        case 'ArrowRight': if (col < COLS) selectCell(row, col + 1); e.preventDefault(); break;
+        case 'Enter': $('formula-input').focus(); e.preventDefault(); break;
+        case 'Escape': if (selectedRange) { selectedRange = null; clearSelectionVisual(); updateCellRefDisplay(); } break;
       }
     });
 
-    function extendSelection(arrowKey) {
-      // Initialize range if not started
-      if (!selectedRange) {
-        selectedRange = {
-          startRow: selectedCell.row,
-          startCol: selectedCell.col,
-          endRow: selectedCell.row,
-          endCol: selectedCell.col
-        };
-      }
-
-      // Extend the end of the range
-      switch (arrowKey) {
-        case 'ArrowUp':
-          if (selectedRange.endRow > 1) selectedRange.endRow--;
-          break;
-        case 'ArrowDown':
-          if (selectedRange.endRow < ROWS) selectedRange.endRow++;
-          break;
-        case 'ArrowLeft':
-          if (selectedRange.endCol > 1) selectedRange.endCol--;
-          break;
-        case 'ArrowRight':
-          if (selectedRange.endCol < COLS) selectedRange.endCol++;
-          break;
-      }
-
-      // Update visual using drag mechanism
+    function extendSelection(key) {
+      if (!selectedRange) selectedRange = { startRow: selectedCell.row, startCol: selectedCell.col, endRow: selectedCell.row, endCol: selectedCell.col };
+      if (key === 'ArrowUp' && selectedRange.endRow > 1) selectedRange.endRow--;
+      else if (key === 'ArrowDown' && selectedRange.endRow < ROWS) selectedRange.endRow++;
+      else if (key === 'ArrowLeft' && selectedRange.endCol > 1) selectedRange.endCol--;
+      else if (key === 'ArrowRight' && selectedRange.endCol < COLS) selectedRange.endCol++;
       dragStart = { row: selectedRange.startRow, col: selectedRange.startCol };
       dragEnd = { row: selectedRange.endRow, col: selectedRange.endCol };
       updateSelectionVisual();
-      dragStart = null;
-      dragEnd = null;
+      dragStart = dragEnd = null;
     }
 
-    // Point mode: Ctrl+Arrow to navigate and insert cell reference
-    // Track last inserted position for keyboard navigation in point mode
-    let pointModeNavPosition = null;
-
-    function navigateAndInsertRef(arrowKey, isShift) {
-      // Initialize nav position from last clicked ref or current cell
-      if (!pointModeNavPosition) {
-        if (pointModeRangeStart) {
-          pointModeNavPosition = { ...pointModeRangeStart };
-        } else {
-          // Start from adjacent to selected cell
-          pointModeNavPosition = { row: selectedCell.row, col: selectedCell.col };
-        }
-      }
-
-      // Move the navigation position
-      switch (arrowKey) {
-        case 'ArrowUp':
-          if (pointModeNavPosition.row > 1) pointModeNavPosition.row--;
-          break;
-        case 'ArrowDown':
-          if (pointModeNavPosition.row < ROWS) pointModeNavPosition.row++;
-          break;
-        case 'ArrowLeft':
-          if (pointModeNavPosition.col > 1) pointModeNavPosition.col--;
-          break;
-        case 'ArrowRight':
-          if (pointModeNavPosition.col < COLS) pointModeNavPosition.col++;
-          break;
-      }
-
-      // Don't insert self-reference
-      if (pointModeNavPosition.row === selectedCell.row &&
-          pointModeNavPosition.col === selectedCell.col) {
-        return;
-      }
-
-      // Insert the cell reference
-      insertCellReference(pointModeNavPosition.row, pointModeNavPosition.col, isShift);
+    function navigateAndInsertRef(key, isShift) {
+      if (!pointModeNavPosition) pointModeNavPosition = pointModeRangeStart ? { ...pointModeRangeStart } : { row: selectedCell.row, col: selectedCell.col };
+      if (key === 'ArrowUp' && pointModeNavPosition.row > 1) pointModeNavPosition.row--;
+      else if (key === 'ArrowDown' && pointModeNavPosition.row < ROWS) pointModeNavPosition.row++;
+      else if (key === 'ArrowLeft' && pointModeNavPosition.col > 1) pointModeNavPosition.col--;
+      else if (key === 'ArrowRight' && pointModeNavPosition.col < COLS) pointModeNavPosition.col++;
+      if (pointModeNavPosition.row !== selectedCell.row || pointModeNavPosition.col !== selectedCell.col) insertCellReference(pointModeNavPosition.row, pointModeNavPosition.col, isShift);
     }
 
     init();
