@@ -160,6 +160,15 @@
       outline-offset: -2px;
     }
 
+    .cell.in-selection {
+      background: rgba(59, 130, 246, 0.15);
+    }
+
+    .cell.selection-corner {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
     .cell.header {
       background: var(--surface);
       color: var(--text-dim);
@@ -494,6 +503,12 @@
     let selectedCell = { row: 1, col: 1 };
     let cells = {};
 
+    // Drag selection state
+    let isDragging = false;
+    let dragStart = null;
+    let dragEnd = null;
+    let selectedRange = null; // { startRow, startCol, endRow, endCol } or null for single cell
+
     // Autocomplete state
     let autocompleteSelectedIndex = -1;
     let autocompleteSuggestions = [];
@@ -702,11 +717,122 @@
           cell.className = 'cell';
           cell.dataset.row = row;
           cell.dataset.col = col;
-          cell.onclick = () => selectCell(row, col);
+          cell.onmousedown = (e) => handleCellMouseDown(e, row, col);
+          cell.onmouseenter = (e) => handleCellMouseEnter(e, row, col);
           cell.ondblclick = () => editCell(row, col);
           spreadsheet.appendChild(cell);
         }
       }
+
+      // Global mouse up to end drag
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    function handleCellMouseDown(e, row, col) {
+      // Prevent text selection during drag
+      e.preventDefault();
+
+      isDragging = true;
+      dragStart = { row, col };
+      dragEnd = { row, col };
+      selectedRange = null;
+
+      selectCell(row, col);
+    }
+
+    function handleCellMouseEnter(e, row, col) {
+      if (!isDragging || !dragStart) return;
+
+      dragEnd = { row, col };
+      updateSelectionVisual();
+    }
+
+    function handleMouseUp() {
+      if (!isDragging) return;
+
+      isDragging = false;
+
+      if (dragStart && dragEnd) {
+        const startRow = Math.min(dragStart.row, dragEnd.row);
+        const endRow = Math.max(dragStart.row, dragEnd.row);
+        const startCol = Math.min(dragStart.col, dragEnd.col);
+        const endCol = Math.max(dragStart.col, dragEnd.col);
+
+        // Only set selectedRange if more than one cell is selected
+        if (startRow !== endRow || startCol !== endCol) {
+          selectedRange = { startRow, startCol, endRow, endCol };
+          updateCellRefDisplay();
+        } else {
+          selectedRange = null;
+        }
+      }
+    }
+
+    function updateSelectionVisual() {
+      // Clear all selection classes
+      document.querySelectorAll('.cell.in-selection, .cell.selection-corner').forEach(c => {
+        c.classList.remove('in-selection', 'selection-corner');
+      });
+
+      if (!dragStart || !dragEnd) return;
+
+      const startRow = Math.min(dragStart.row, dragEnd.row);
+      const endRow = Math.max(dragStart.row, dragEnd.row);
+      const startCol = Math.min(dragStart.col, dragEnd.col);
+      const endCol = Math.max(dragStart.col, dragEnd.col);
+
+      // Highlight all cells in range
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startCol; c <= endCol; c++) {
+          const cell = getCellElement(r, c);
+          if (cell) {
+            cell.classList.add('in-selection');
+          }
+        }
+      }
+
+      // Mark corners for the selection outline
+      const cornerCell = getCellElement(endRow, endCol);
+      if (cornerCell) {
+        cornerCell.classList.add('selection-corner');
+      }
+
+      // Update cell ref to show range
+      if (startRow !== endRow || startCol !== endCol) {
+        const rangeStr = `${colToLetter(startCol)}${startRow}:${colToLetter(endCol)}${endRow}`;
+        document.getElementById('cell-ref').textContent = rangeStr;
+      }
+    }
+
+    function updateCellRefDisplay() {
+      if (selectedRange) {
+        const { startRow, startCol, endRow, endCol } = selectedRange;
+        const rangeStr = `${colToLetter(startCol)}${startRow}:${colToLetter(endCol)}${endRow}`;
+        document.getElementById('cell-ref').textContent = rangeStr;
+      } else {
+        document.getElementById('cell-ref').textContent = colToLetter(selectedCell.col) + selectedCell.row;
+      }
+    }
+
+    function clearSelectionVisual() {
+      document.querySelectorAll('.cell.in-selection, .cell.selection-corner').forEach(c => {
+        c.classList.remove('in-selection', 'selection-corner');
+      });
+    }
+
+    function getSelectedCells() {
+      if (!selectedRange) {
+        return [{ row: selectedCell.row, col: selectedCell.col }];
+      }
+
+      const { startRow, startCol, endRow, endCol } = selectedRange;
+      const result = [];
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startCol; c <= endCol; c++) {
+          result.push({ row: r, col: c });
+        }
+      }
+      return result;
     }
 
     function colToLetter(col) {
@@ -719,9 +845,15 @@
       return result;
     }
 
-    function selectCell(row, col) {
+    function selectCell(row, col, clearRange = true) {
       // Deselect previous
       document.querySelectorAll('.cell.selected').forEach(c => c.classList.remove('selected'));
+
+      // Clear range selection if requested
+      if (clearRange) {
+        selectedRange = null;
+        clearSelectionVisual();
+      }
 
       // Select new
       selectedCell = { row, col };
@@ -879,6 +1011,13 @@
 
       const { row, col } = selectedCell;
 
+      // Shift+Arrow for range selection
+      if (e.shiftKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        e.preventDefault();
+        extendSelection(e.key);
+        return;
+      }
+
       switch (e.key) {
         case 'ArrowUp':
           if (row > 1) selectCell(row - 1, col);
@@ -900,8 +1039,51 @@
           document.getElementById('formula-input').focus();
           e.preventDefault();
           break;
+        case 'Escape':
+          // Clear range selection
+          if (selectedRange) {
+            selectedRange = null;
+            clearSelectionVisual();
+            updateCellRefDisplay();
+          }
+          break;
       }
     });
+
+    function extendSelection(arrowKey) {
+      // Initialize range if not started
+      if (!selectedRange) {
+        selectedRange = {
+          startRow: selectedCell.row,
+          startCol: selectedCell.col,
+          endRow: selectedCell.row,
+          endCol: selectedCell.col
+        };
+      }
+
+      // Extend the end of the range
+      switch (arrowKey) {
+        case 'ArrowUp':
+          if (selectedRange.endRow > 1) selectedRange.endRow--;
+          break;
+        case 'ArrowDown':
+          if (selectedRange.endRow < ROWS) selectedRange.endRow++;
+          break;
+        case 'ArrowLeft':
+          if (selectedRange.endCol > 1) selectedRange.endCol--;
+          break;
+        case 'ArrowRight':
+          if (selectedRange.endCol < COLS) selectedRange.endCol++;
+          break;
+      }
+
+      // Update visual using drag mechanism
+      dragStart = { row: selectedRange.startRow, col: selectedRange.startCol };
+      dragEnd = { row: selectedRange.endRow, col: selectedRange.endCol };
+      updateSelectionVisual();
+      dragStart = null;
+      dragEnd = null;
+    }
 
     init();
   </script>
