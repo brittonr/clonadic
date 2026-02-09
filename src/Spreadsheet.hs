@@ -62,6 +62,7 @@ data CellValue
   = CellEmpty
   | CellNumber Double
   | CellText Text
+  | CellBoolean Bool
   | CellError Text
   deriving (Show, Eq, Generic)
 
@@ -154,16 +155,29 @@ evaluateFormula formulaText grid = do
     clonad @(Text, Text) @Text
       ( T.unlines
           [ "You are a spreadsheet formula engine. Evaluate the given formula.",
-            "Cell values are provided as context. Return ONLY the numeric result.",
-            "If the formula is invalid or references empty cells, return 'ERROR: <reason>'.",
-            "Do not explain. Just the number or error.",
+            "Cell values are provided as context.",
+            "",
+            "Return formats:",
+            "  - Numbers: just the number (e.g., 42, 3.14, -5)",
+            "  - Text: the text value without quotes (e.g., Hello World)",
+            "  - Booleans: TRUE or FALSE (uppercase)",
+            "  - Errors: ERROR: <reason>",
+            "",
+            "Do not explain. Just return the result value.",
             "",
             "Examples:",
-            "  Formula: =2+2  ->  4",
-            "  Formula: =A1*B1 (A1=10, B1=5)  ->  50",
-            "  Formula: =SUM(A1:A3) (A1=1, A2=2, A3=3)  ->  6",
-            "  Formula: =IF(A1>10,100,0) (A1=15)  ->  100",
-            "  Formula: =A1 (A1 is empty)  ->  ERROR: A1 is empty"
+            "  =2+2  ->  4",
+            "  =A1*B1 (A1=10, B1=5)  ->  50",
+            "  =SUM(A1:A3) (A1=1, A2=2, A3=3)  ->  6",
+            "  =IF(A1>10, \"big\", \"small\") (A1=15)  ->  big",
+            "  =CONCAT(A1, B1) (A1=\"Hello\", B1=\" World\")  ->  Hello World",
+            "  =UPPER(A1) (A1=\"hello\")  ->  HELLO",
+            "  =LEFT(A1, 3) (A1=\"Hello\")  ->  Hel",
+            "  =LEN(A1) (A1=\"Hello\")  ->  5",
+            "  =A1>10 (A1=15)  ->  TRUE",
+            "  =AND(A1>5, B1<20) (A1=10, B1=15)  ->  TRUE",
+            "  =ISBLANK(A1) (A1 is empty)  ->  TRUE",
+            "  =A1 (A1 is empty)  ->  ERROR: A1 is empty"
           ]
       )
       (formula, context)
@@ -180,6 +194,7 @@ gridContext grid =
     isValidCell cell = case cellValue cell of
       CellNumber _ -> True
       CellText _ -> True
+      CellBoolean _ -> True
       _ -> False
 
     formatCell (coord, cell) =
@@ -188,6 +203,7 @@ gridContext grid =
     displayValue CellEmpty = "<empty>"
     displayValue (CellNumber n) = T.pack (show n)
     displayValue (CellText t) = "\"" <> t <> "\""
+    displayValue (CellBoolean b) = if b then "TRUE" else "FALSE"
     displayValue (CellError _) = "<error>"  -- Shouldn't reach here due to filter
 
 -- Exported version of gridContext for debugging
@@ -201,16 +217,22 @@ evaluateFormulaWithLogging formulaText grid = do
       formula = T.strip formulaText
       systemPrompt = T.unlines
           [ "You are a spreadsheet formula engine. Evaluate the given formula.",
-            "Cell values are provided as context. Return ONLY the numeric result.",
-            "If the formula is invalid or references empty cells, return 'ERROR: <reason>'.",
-            "Do not explain. Just the number or error.",
+            "Cell values are provided as context.",
+            "",
+            "Return formats:",
+            "  - Numbers: just the number (e.g., 42, 3.14, -5)",
+            "  - Text: the text value without quotes (e.g., Hello World)",
+            "  - Booleans: TRUE or FALSE (uppercase)",
+            "  - Errors: ERROR: <reason>",
+            "",
+            "Do not explain. Just return the result value.",
             "",
             "Examples:",
-            "  Formula: =2+2  ->  4",
-            "  Formula: =A1*B1 (A1=10, B1=5)  ->  50",
-            "  Formula: =SUM(A1:A3) (A1=1, A2=2, A3=3)  ->  6",
-            "  Formula: =IF(A1>10,100,0) (A1=15)  ->  100",
-            "  Formula: =A1 (A1 is empty)  ->  ERROR: A1 is empty"
+            "  =2+2  ->  4",
+            "  =IF(A1>10, \"big\", \"small\") (A1=15)  ->  big",
+            "  =CONCAT(A1, B1) (A1=\"Hello\", B1=\" World\")  ->  Hello World",
+            "  =A1>10 (A1=15)  ->  TRUE",
+            "  =A1 (A1 is empty)  ->  ERROR: A1 is empty"
           ]
   -- Log the full prompt
   let _ = trace ("\n=== LLM PROMPT ===\nSystem: " ++ T.unpack systemPrompt ++
@@ -223,11 +245,18 @@ evaluateFormulaWithLogging formulaText grid = do
 parseResult :: Text -> CellValue
 parseResult t =
   let stripped = T.strip t
-   in if "ERROR" `T.isPrefixOf` T.toUpper stripped
-        then CellError (T.drop 6 stripped) -- Drop "ERROR:" prefix
+      upper = T.toUpper stripped
+   in if T.null stripped
+        then CellEmpty
+        else if "ERROR:" `T.isPrefixOf` upper || "ERROR " `T.isPrefixOf` upper
+          then CellError (T.strip $ T.drop 6 stripped)
+        else if upper == "TRUE"
+          then CellBoolean True
+        else if upper == "FALSE"
+          then CellBoolean False
         else case reads (T.unpack stripped) of
           [(n, "")] -> CellNumber n
-          _ -> CellError $ "Could not parse: " <> stripped
+          _ -> CellText stripped  -- Default to text, not error!
 
 -- Autocomplete functionality
 

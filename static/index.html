@@ -192,6 +192,15 @@
       color: var(--error);
     }
 
+    .cell.boolean {
+      color: #a855f7;
+      font-weight: 600;
+    }
+
+    .cell.text {
+      color: var(--success);
+    }
+
     .cell.loading {
       color: var(--text-dim);
       font-style: italic;
@@ -819,12 +828,18 @@
           const cellEl = getCellElement(row, col);
           if (cellEl) {
             cellEl.textContent = cellData.display || '';
-            cellEl.classList.remove('formula', 'error');
+            cellEl.classList.remove('formula', 'error', 'boolean', 'text');
             if (cellData.formula) {
               cellEl.classList.add('formula');
             }
-            if (cellData.value && cellData.value.tag === 'CellError') {
-              cellEl.classList.add('error');
+            if (cellData.value) {
+              if (cellData.value.tag === 'CellError') {
+                cellEl.classList.add('error');
+              } else if (cellData.value.tag === 'CellBoolean') {
+                cellEl.classList.add('boolean');
+              } else if (cellData.value.tag === 'CellText' && cellData.formula) {
+                cellEl.classList.add('text');
+              }
             }
           }
         }

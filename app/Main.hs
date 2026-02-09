@@ -176,6 +176,7 @@ updateCell AppState {..} coord inputValue = do
                 CellEmpty -> ""
                 CellNumber n -> T.pack $ showNumber n
                 CellText t -> t
+                CellBoolean b -> if b then "TRUE" else "FALSE"
                 CellError e -> "ERROR: " <> e
 
           let newCell =
@@ -280,15 +281,11 @@ recalculateCell env gridVar statsVar coord = do
               CellEmpty -> ""
               CellNumber n -> T.pack $ showNumber n
               CellText t -> t
+              CellBoolean b -> if b then "TRUE" else "FALSE"
               CellError e -> "ERROR: " <> e
         putStrLn $ "--- LLM RESPONSE ---"
         putStrLn $ "Result: " ++ T.unpack displayText
         putStrLn "==========================================="
-        let displayText = case result of
-              CellEmpty -> ""
-              CellNumber n -> T.pack $ showNumber n
-              CellText t -> t
-              CellError e -> "ERROR: " <> e
         let newCell = cell {cellValue = result, cellDisplay = displayText}
         atomically $ do
           modifyTVar' gridVar (Map.insert coord newCell)
@@ -344,6 +341,7 @@ recalcCell env statsVar grid (coord, cell) = do
             CellEmpty -> ""
             CellNumber n -> T.pack $ showNumber n
             CellText t -> t
+            CellBoolean b -> if b then "TRUE" else "FALSE"
             CellError e -> "ERROR: " <> e
 
       let newCell =
