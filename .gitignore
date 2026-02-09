@@ -1,0 +1,17 @@
+# Cabal/GHC build artifacts
+dist-newstyle/
+dist/
+*.hi
+*.o
+*.dyn_hi
+*.dyn_o
+
+# Nix
+result
+result-*
+
+# Editor
+*~
+*.swp
+.idea/
+.vscode/
