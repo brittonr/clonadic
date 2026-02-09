@@ -215,6 +215,55 @@
       font-style: italic;
     }
 
+    /* Point mode - cells are clickable during formula editing */
+    .cell.point-mode {
+      cursor: crosshair;
+    }
+
+    .cell.point-mode:hover {
+      background: rgba(59, 130, 246, 0.3);
+      outline: 2px dashed var(--accent);
+      outline-offset: -2px;
+    }
+
+    .cell.point-mode.self-ref {
+      cursor: not-allowed;
+    }
+
+    .cell.point-mode.self-ref:hover {
+      background: rgba(239, 68, 68, 0.2);
+      outline: 2px dashed var(--error);
+    }
+
+    /* Formula reference highlighting */
+    .cell.formula-ref {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .cell.formula-ref-range {
+      background: rgba(59, 130, 246, 0.15);
+    }
+
+    /* Point mode indicator in formula bar */
+    .formula-bar.point-mode .cell-ref::after {
+      content: ' (click cells)';
+      font-size: 10px;
+      color: var(--accent);
+      font-weight: normal;
+    }
+
+    .formula-bar.point-mode #formula-input {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+
+    /* Range selection start marker during point mode */
+    .cell.range-start {
+      outline: 2px solid var(--success);
+      outline-offset: -2px;
+    }
+
     footer {
       background: var(--surface);
       border-top: 1px solid var(--border);
@@ -430,7 +479,7 @@
     <label>fx</label>
     <div class="cell-ref" id="cell-ref">A1</div>
     <div class="autocomplete-container">
-      <input type="text" id="formula-input" placeholder="Enter a value or formula (e.g., =SUM(A1:A5))" autocomplete="off">
+      <input type="text" id="formula-input" placeholder="Enter a value or formula (=... then click cells to insert references)" autocomplete="off">
       <div class="autocomplete-dropdown" id="autocomplete-dropdown">
         <div class="autocomplete-hint">Type = to start a formula, then type function names or cell references</div>
       </div>
@@ -514,11 +563,16 @@
     let autocompleteSuggestions = [];
     let autocompleteDebounceTimer = null;
 
+    // Point mode state - for clicking cells to insert references during formula editing
+    let isInPointMode = false;
+    let pointModeRangeStart = null; // For shift+click range selection
+
     function init() {
       renderGrid();
       selectCell(1, 1);
       loadGrid();
       setupAutocomplete();
+      setupPointMode();
     }
 
     function setupAutocomplete() {
@@ -577,6 +631,299 @@
         if (!e.target.closest('.autocomplete-container')) {
           hideAutocomplete();
         }
+      });
+    }
+
+    // Point Mode: Click cells to insert references while editing formulas
+    function setupPointMode() {
+      const input = document.getElementById('formula-input');
+
+      // Enter point mode when typing a formula
+      input.addEventListener('input', () => {
+        updatePointMode();
+      });
+
+      input.addEventListener('focus', () => {
+        updatePointMode();
+      });
+
+      input.addEventListener('blur', () => {
+        // Small delay to allow click events to fire first
+        setTimeout(() => {
+          exitPointMode();
+        }, 100);
+      });
+    }
+
+    function updatePointMode() {
+      const input = document.getElementById('formula-input');
+      const value = input.value;
+      const wasInPointMode = isInPointMode;
+
+      // Enter point mode if:
+      // 1. Input starts with = (is a formula)
+      // 2. Input is focused
+      isInPointMode = value.startsWith('=') && document.activeElement === input;
+
+      if (isInPointMode !== wasInPointMode) {
+        if (isInPointMode) {
+          enterPointMode();
+        } else {
+          exitPointMode();
+        }
+      }
+
+      // Update formula reference highlighting
+      if (isInPointMode) {
+        highlightFormulaReferences(value);
+      }
+    }
+
+    function enterPointMode() {
+      isInPointMode = true;
+      pointModeRangeStart = null;
+
+      // Add visual indicator to formula bar
+      document.querySelector('.formula-bar').classList.add('point-mode');
+
+      // Mark all cells as clickable (except current cell)
+      document.querySelectorAll('.cell:not(.header):not(.row-header)').forEach(cell => {
+        const row = parseInt(cell.dataset.row);
+        const col = parseInt(cell.dataset.col);
+
+        cell.classList.add('point-mode');
+
+        // Mark the cell being edited as self-ref (can't click it)
+        if (row === selectedCell.row && col === selectedCell.col) {
+          cell.classList.add('self-ref');
+        }
+      });
+    }
+
+    function exitPointMode() {
+      isInPointMode = false;
+      pointModeRangeStart = null;
+      pointModeNavPosition = null;
+
+      // Remove visual indicators
+      document.querySelector('.formula-bar').classList.remove('point-mode');
+      document.querySelectorAll('.cell.point-mode').forEach(cell => {
+        cell.classList.remove('point-mode', 'self-ref', 'range-start');
+      });
+      clearFormulaRefHighlights();
+    }
+
+    function insertCellReference(row, col, isShiftClick = false) {
+      const input = document.getElementById('formula-input');
+      const ref = colToLetter(col) + row;
+
+      // Handle shift+click for range selection
+      if (isShiftClick && pointModeRangeStart) {
+        const startRef = colToLetter(pointModeRangeStart.col) + pointModeRangeStart.row;
+        const rangeRef = `${startRef}:${ref}`;
+
+        // Remove the previous single ref and insert range
+        insertAtCursor(input, rangeRef, true);
+        pointModeRangeStart = null;
+
+        // Clear range start visual
+        document.querySelectorAll('.cell.range-start').forEach(c => c.classList.remove('range-start'));
+      } else {
+        // Single cell reference
+        insertAtCursor(input, ref, false);
+
+        // Set as potential range start for next shift+click
+        pointModeRangeStart = { row, col };
+
+        // Visual indicator for range start
+        document.querySelectorAll('.cell.range-start').forEach(c => c.classList.remove('range-start'));
+        const cellEl = getCellElement(row, col);
+        if (cellEl) {
+          cellEl.classList.add('range-start');
+        }
+      }
+
+      // Keep focus on input and update highlighting
+      input.focus();
+      highlightFormulaReferences(input.value);
+    }
+
+    function insertAtCursor(input, text, replaceLastRef) {
+      const start = input.selectionStart;
+      const end = input.selectionEnd;
+      const value = input.value;
+
+      let newValue;
+      let newCursorPos;
+
+      if (replaceLastRef) {
+        // Replace the last cell reference (for range completion)
+        // Find the last token that looks like a cell ref
+        const beforeCursor = value.substring(0, start);
+        const afterCursor = value.substring(end);
+
+        // Find where the last token starts
+        const delimiters = '(),+-*/^&=<>: ';
+        let lastDelimIdx = -1;
+        for (let i = beforeCursor.length - 1; i >= 0; i--) {
+          if (delimiters.includes(beforeCursor[i])) {
+            lastDelimIdx = i;
+            break;
+          }
+        }
+
+        newValue = beforeCursor.substring(0, lastDelimIdx + 1) + text + afterCursor;
+        newCursorPos = lastDelimIdx + 1 + text.length;
+      } else {
+        // Check if we should add the reference or replace selection
+        if (start !== end) {
+          // Replace selection
+          newValue = value.substring(0, start) + text + value.substring(end);
+          newCursorPos = start + text.length;
+        } else {
+          // Check what's before cursor - if we're in the middle of typing, replace
+          const beforeCursor = value.substring(0, start);
+          const afterCursor = value.substring(start);
+
+          // Check if cursor is at a delimiter or start of input
+          const delimiters = '(),+-*/^&=<>: ';
+          const lastChar = beforeCursor.length > 0 ? beforeCursor[beforeCursor.length - 1] : '=';
+
+          if (delimiters.includes(lastChar)) {
+            // Insert at cursor position
+            newValue = beforeCursor + text + afterCursor;
+            newCursorPos = start + text.length;
+          } else {
+            // We're in the middle of a token, replace it
+            let tokenStart = beforeCursor.length;
+            for (let i = beforeCursor.length - 1; i >= 0; i--) {
+              if (delimiters.includes(beforeCursor[i])) {
+                tokenStart = i + 1;
+                break;
+              }
+              if (i === 0) tokenStart = 0;
+            }
+
+            // Find token end
+            let tokenEnd = start;
+            for (let i = 0; i < afterCursor.length; i++) {
+              if (delimiters.includes(afterCursor[i])) {
+                break;
+              }
+              tokenEnd++;
+            }
+
+            newValue = value.substring(0, tokenStart) + text + value.substring(tokenEnd);
+            newCursorPos = tokenStart + text.length;
+          }
+        }
+      }
+
+      input.value = newValue;
+      input.setSelectionRange(newCursorPos, newCursorPos);
+    }
+
+    function highlightFormulaReferences(formula) {
+      clearFormulaRefHighlights();
+
+      if (!formula.startsWith('=')) return;
+
+      // Extract cell references from formula
+      const refs = extractRefsFromFormula(formula);
+
+      refs.forEach(ref => {
+        if (ref.type === 'single') {
+          const cellEl = getCellElement(ref.row, ref.col);
+          if (cellEl) {
+            cellEl.classList.add('formula-ref');
+          }
+        } else if (ref.type === 'range') {
+          // Highlight all cells in range
+          for (let r = ref.startRow; r <= ref.endRow; r++) {
+            for (let c = ref.startCol; c <= ref.endCol; c++) {
+              const cellEl = getCellElement(r, c);
+              if (cellEl) {
+                cellEl.classList.add('formula-ref', 'formula-ref-range');
+              }
+            }
+          }
+        }
+      });
+    }
+
+    function extractRefsFromFormula(formula) {
+      const refs = [];
+      const delimiters = '(),+-*/^&=<>: ';
+
+      // Tokenize
+      const tokens = [];
+      let current = '';
+      for (const char of formula) {
+        if (delimiters.includes(char)) {
+          if (current) tokens.push(current);
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      if (current) tokens.push(current);
+
+      // Parse tokens
+      tokens.forEach(token => {
+        const upperToken = token.toUpperCase();
+
+        if (upperToken.includes(':')) {
+          // Range reference like A1:B5
+          const parts = upperToken.split(':');
+          if (parts.length === 2) {
+            const start = parseRef(parts[0]);
+            const end = parseRef(parts[1]);
+            if (start && end) {
+              refs.push({
+                type: 'range',
+                startRow: Math.min(start.row, end.row),
+                startCol: Math.min(start.col, end.col),
+                endRow: Math.max(start.row, end.row),
+                endCol: Math.max(start.col, end.col)
+              });
+            }
+          }
+        } else {
+          // Single cell reference like A1
+          const parsed = parseRef(upperToken);
+          if (parsed) {
+            refs.push({ type: 'single', ...parsed });
+          }
+        }
+      });
+
+      return refs;
+    }
+
+    function parseRef(ref) {
+      const match = ref.match(/^([A-Z]+)(\d+)$/);
+      if (!match) return null;
+
+      const colStr = match[1];
+      const rowStr = match[2];
+
+      // Convert column letters to number
+      let col = 0;
+      for (let i = 0; i < colStr.length; i++) {
+        col = col * 26 + (colStr.charCodeAt(i) - 64);
+      }
+
+      const row = parseInt(rowStr);
+
+      if (row > 0 && row <= ROWS && col > 0 && col <= COLS) {
+        return { row, col };
+      }
+      return null;
+    }
+
+    function clearFormulaRefHighlights() {
+      document.querySelectorAll('.cell.formula-ref, .cell.formula-ref-range').forEach(cell => {
+        cell.classList.remove('formula-ref', 'formula-ref-range');
       });
     }
 
@@ -732,6 +1079,18 @@
       // Prevent text selection during drag
       e.preventDefault();
 
+      // Point mode: clicking cells inserts references into formula
+      if (isInPointMode) {
+        // Don't allow clicking the cell being edited (self-reference)
+        if (row === selectedCell.row && col === selectedCell.col) {
+          return;
+        }
+
+        // Insert cell reference at cursor position
+        insertCellReference(row, col, e.shiftKey);
+        return;
+      }
+
       isDragging = true;
       dragStart = { row, col };
       dragEnd = { row, col };
@@ -741,6 +1100,13 @@
     }
 
     function handleCellMouseEnter(e, row, col) {
+      // In point mode, drag creates a range reference
+      if (isInPointMode && isDragging && dragStart) {
+        dragEnd = { row, col };
+        updatePointModeRangeVisual();
+        return;
+      }
+
       if (!isDragging || !dragStart) return;
 
       dragEnd = { row, col };
@@ -749,6 +1115,33 @@
 
     function handleMouseUp() {
       if (!isDragging) return;
+
+      // Point mode: complete range selection on mouse up
+      if (isInPointMode && dragStart && dragEnd) {
+        isDragging = false;
+
+        const startRow = Math.min(dragStart.row, dragEnd.row);
+        const endRow = Math.max(dragStart.row, dragEnd.row);
+        const startCol = Math.min(dragStart.col, dragEnd.col);
+        const endCol = Math.max(dragStart.col, dragEnd.col);
+
+        // Insert range reference if dragged across multiple cells
+        if (startRow !== endRow || startCol !== endCol) {
+          const rangeRef = `${colToLetter(startCol)}${startRow}:${colToLetter(endCol)}${endRow}`;
+          const input = document.getElementById('formula-input');
+
+          // Replace the single cell ref we inserted on mousedown with the range
+          insertAtCursor(input, rangeRef, true);
+          input.focus();
+          highlightFormulaReferences(input.value);
+        }
+
+        // Clear point mode range visuals
+        clearPointModeRangeVisual();
+        dragStart = null;
+        dragEnd = null;
+        return;
+      }
 
       isDragging = false;
 
@@ -766,6 +1159,33 @@
           selectedRange = null;
         }
       }
+    }
+
+    function updatePointModeRangeVisual() {
+      // Clear previous visual
+      clearPointModeRangeVisual();
+
+      if (!dragStart || !dragEnd) return;
+
+      const startRow = Math.min(dragStart.row, dragEnd.row);
+      const endRow = Math.max(dragStart.row, dragEnd.row);
+      const startCol = Math.min(dragStart.col, dragEnd.col);
+      const endCol = Math.max(dragStart.col, dragEnd.col);
+
+      // Highlight the range being selected
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startCol; c <= endCol; c++) {
+          const cell = getCellElement(r, c);
+          if (cell) {
+            cell.classList.add('formula-ref', 'formula-ref-range');
+          }
+        }
+      }
+    }
+
+    function clearPointModeRangeVisual() {
+      // This is handled by clearFormulaRefHighlights but called separately
+      // to not clear other ref highlights
     }
 
     function updateSelectionVisual() {
@@ -1004,8 +1424,17 @@
     document.addEventListener('keydown', (e) => {
       if (document.activeElement.id === 'formula-input') {
         if (e.key === 'Escape') {
+          exitPointMode();
           document.activeElement.blur();
         }
+
+        // In point mode, arrow keys can navigate to insert cell refs
+        if (isInPointMode && e.ctrlKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+          e.preventDefault();
+          navigateAndInsertRef(e.key, e.shiftKey);
+          return;
+        }
+
         return;
       }
 
@@ -1083,6 +1512,47 @@
       updateSelectionVisual();
       dragStart = null;
       dragEnd = null;
+    }
+
+    // Point mode: Ctrl+Arrow to navigate and insert cell reference
+    // Track last inserted position for keyboard navigation in point mode
+    let pointModeNavPosition = null;
+
+    function navigateAndInsertRef(arrowKey, isShift) {
+      // Initialize nav position from last clicked ref or current cell
+      if (!pointModeNavPosition) {
+        if (pointModeRangeStart) {
+          pointModeNavPosition = { ...pointModeRangeStart };
+        } else {
+          // Start from adjacent to selected cell
+          pointModeNavPosition = { row: selectedCell.row, col: selectedCell.col };
+        }
+      }
+
+      // Move the navigation position
+      switch (arrowKey) {
+        case 'ArrowUp':
+          if (pointModeNavPosition.row > 1) pointModeNavPosition.row--;
+          break;
+        case 'ArrowDown':
+          if (pointModeNavPosition.row < ROWS) pointModeNavPosition.row++;
+          break;
+        case 'ArrowLeft':
+          if (pointModeNavPosition.col > 1) pointModeNavPosition.col--;
+          break;
+        case 'ArrowRight':
+          if (pointModeNavPosition.col < COLS) pointModeNavPosition.col++;
+          break;
+      }
+
+      // Don't insert self-reference
+      if (pointModeNavPosition.row === selectedCell.row &&
+          pointModeNavPosition.col === selectedCell.col) {
+        return;
+      }
+
+      // Insert the cell reference
+      insertCellReference(pointModeNavPosition.row, pointModeNavPosition.col, isShift);
     }
 
     init();
