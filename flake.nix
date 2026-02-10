@@ -47,7 +47,7 @@
           withHoogle = true;
 
           OLLAMA_HOST = "http://localhost:11434";
-          CLONAD_MODEL = "qwen2.5:3b";
+          CLONAD_MODEL = "qwen3:4b";
 
           shellHook = ''
             # Start Ollama in background if not running
@@ -58,12 +58,12 @@
             fi
 
             # Pull the model if not present
-            if ! ollama list 2>/dev/null | grep -q "qwen2.5:3b"; then
-              echo "Pulling qwen2.5:3b model (~2GB)..."
-              ollama pull qwen2.5:3b
+            if ! ollama list 2>/dev/null | grep -q "qwen3:4b"; then
+              echo "Pulling qwen3:4b model (~2.5GB)..."
+              ollama pull qwen3:4b
             fi
 
-            echo "Ollama ready with qwen2.5:3b model"
+            echo "Ollama ready with qwen3:4b model"
             echo "OLLAMA_HOST=$OLLAMA_HOST"
             echo "CLONAD_MODEL=$CLONAD_MODEL"
           '';

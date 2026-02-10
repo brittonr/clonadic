@@ -9,7 +9,7 @@ provider = "ollama"
 base_url = "http://localhost:11434"
 # API key for OpenAI or Anthropic (not needed for Ollama)
 # api_key = "sk-..."
-model = "qwen2.5:0.5b"
+model = "qwen3:4b"
 temperature = 0.0
 
 [stats]

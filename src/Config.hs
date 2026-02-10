@@ -71,7 +71,7 @@ defaultConfig =
           { llmProvider = Ollama,
             llmBaseUrl = Just "http://localhost:11434",
             llmApiKey = Nothing,
-            llmModel = "qwen2.5:0.5b",
+            llmModel = "qwen3:4b",
             llmTemperature = 0.0
           },
       configStats =
