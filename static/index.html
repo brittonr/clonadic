@@ -670,7 +670,7 @@
         if (dropdown.classList.contains('active') && autocompleteSuggestions.length > 0) {
           if (e.key === 'ArrowDown') { e.preventDefault(); autocompleteSelectedIndex = Math.min(autocompleteSelectedIndex + 1, autocompleteSuggestions.length - 1); updateAutocompleteSelection(); return; }
           if (e.key === 'ArrowUp') { e.preventDefault(); autocompleteSelectedIndex = Math.max(autocompleteSelectedIndex - 1, 0); updateAutocompleteSelection(); return; }
-          if (e.key === 'Tab' || (e.key === 'Enter' && autocompleteSelectedIndex >= 0)) { e.preventDefault(); applyAutocompleteSuggestion(autocompleteSelectedIndex); return; }
+          if (e.key === 'Tab' && autocompleteSelectedIndex >= 0) { e.preventDefault(); applyAutocompleteSuggestion(autocompleteSelectedIndex); return; }
           if (e.key === 'Escape') { hideAutocomplete(); return; }
         }
         if (e.key === 'Enter') { hideAutocomplete(); submitFormula(); }
@@ -920,7 +920,7 @@
         const tc = s.suggestionType === 'SuggestionFunction' ? 'function' : s.suggestionType === 'SuggestionCell' ? 'cell' : 'range';
         const tl = s.suggestionType === 'SuggestionFunction' ? 'fn' : s.suggestionType === 'SuggestionCell' ? 'cell' : 'range';
         return `<div class="autocomplete-item${i === autocompleteSelectedIndex ? ' selected' : ''}" onclick="applyAutocompleteSuggestion(${i})"><div class="autocomplete-main"><span class="autocomplete-text">${escapeHtml(s.suggestionDisplay)}</span><span class="autocomplete-type ${tc}">${tl}</span></div><div class="autocomplete-desc">${escapeHtml(s.suggestionDescription)}</div></div>`;
-      }).join('') + '<div class="autocomplete-hint">Tab or Enter to select, Esc to close</div>';
+      }).join('') + '<div class="autocomplete-hint">Tab to fill, Enter to submit, Esc to close</div>';
       dropdown.classList.add('active');
     }
 

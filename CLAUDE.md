@@ -33,6 +33,7 @@ ghcid --command="cabal repl clonadic"
 
 **Backend (Haskell):**
 - `src/Spreadsheet.hs` - Core library: Grid/Cell types, formula evaluation via LLM, dependency tracking, cell reference parsing
+- `src/Config.hs` - TOML configuration parsing (server, LLM, grid settings)
 - `app/Main.hs` - Scotty web server with REST API, STM-based state management
 
 **Frontend:**
@@ -41,20 +42,16 @@ ghcid --command="cabal repl clonadic"
 **Key Flow:**
 1. User edits cell via frontend
 2. `POST /api/cell` receives update
-3. If formula (starts with `=`): evaluate via Clonad LLM library
-4. `findDependentCells` identifies cells referencing this one
+3. If formula (starts with `=`): evaluate via Clonad LLM library using `clonad` function
+4. `findDependentCells` identifies cells referencing this one via `extractCellRefs`
 5. Cascading recalculation triggers for all dependents
 
-**API Endpoints:**
-- `GET /` - Serve frontend
-- `GET /api/grid` - Current grid state + stats
-- `POST /api/cell` - Update cell (triggers recalculation)
-- `POST /api/recalculate` - Recalculate all formulas
-- `GET /api/autocomplete` - Formula completions
+**Configuration:**
+Edit `config.toml` to change server port, LLM model, grid dimensions, or stats tracking.
 
 ## Dependencies
 
-- **Clonad**: Custom Haskell library for LLM integration (located at `../clonad`)
+- **Clonad**: Custom Haskell library for LLM integration (flake input from `../clonad`)
 - **Ollama**: Local LLM runtime (auto-started by `nix develop`)
 - **Model**: `qwen2.5:0.5b` (lightweight 400MB model)
 
