@@ -4,6 +4,7 @@
 module Main where
 
 import Clonad (ClonadEnv, defaultEnv, runClonad, withTemperature)
+import Config
 import Control.Concurrent.STM
 import Data.Aeson (object, (.=))
 import Data.Aeson qualified as Aeson
@@ -20,26 +21,49 @@ import Spreadsheet
 import Data.Maybe (fromMaybe)
 import Data.List (nub)
 import Control.Monad (forM_)
+import System.Directory (doesFileExist)
 import Web.Scotty
+
+loadConfigWithFallback :: FilePath -> IO Config
+loadConfigWithFallback path = do
+  exists <- doesFileExist path
+  if exists
+    then do
+      result <- loadConfig path
+      case result of
+        Left err -> do
+          putStrLn $ "Warning: Failed to parse config: " ++ T.unpack err
+          putStrLn "Using default configuration."
+          pure defaultConfig
+        Right cfg -> do
+          putStrLn $ "Loaded config from " ++ path
+          pure cfg
+    else do
+      putStrLn $ "Config file not found at " ++ path ++ ", using defaults."
+      pure defaultConfig
 
 data AppState = AppState
   { appGrid :: TVar Grid,
     appStats :: TVar Stats,
-    appEnv :: ClonadEnv
+    appEnv :: ClonadEnv,
+    appConfig :: Config
   }
 
 main :: IO ()
 main = do
   putStrLn "ClonadSheet - Every formula evaluation is a prayer."
-  putStrLn "Starting server on http://localhost:8080"
+
+  cfg <- loadConfigWithFallback "config.toml"
+  let port = serverPort (configServer cfg)
+  putStrLn $ "Starting server on http://" ++ T.unpack (serverHost (configServer cfg)) ++ ":" ++ show port
 
   env <- defaultEnv
   gridVar <- newTVarIO emptyGrid
   statsVar <- newTVarIO emptyStats
 
-  let state = AppState gridVar statsVar env
+  let state = AppState gridVar statsVar env cfg
 
-  scotty 8080 $ do
+  scotty port $ do
     middleware logStdoutDev
     middleware $ staticPolicy (addBase "static")
 
@@ -80,7 +104,8 @@ main = do
       inputParam <- queryParamMaybe "input"
       let input = fromMaybe "" inputParam
       grid <- liftIO $ readTVarIO (appGrid state)
-      let suggestions = getAutocompleteSuggestions input grid 20 10
+      let gridCfg = configGrid (appConfig state)
+          suggestions = getAutocompleteSuggestions input grid (gridDefaultRows gridCfg) (gridDefaultCols gridCfg)
       json $ object ["suggestions" .= suggestions]
 
 jsonParam :: (Aeson.FromJSON a) => TL.Text -> ActionM a
@@ -132,7 +157,7 @@ updateCell AppState {..} coord inputValue = do
       -- Clear the cell
       atomically $ modifyTVar' appGrid (Map.delete coord)
       -- Recalculate dependents after clearing
-      recalculateDependents appEnv appGrid appStats coord
+      recalculateDependents appEnv appGrid appStats appConfig coord
       grid <- readTVarIO appGrid
       stats <- readTVarIO appStats
       pure $
@@ -186,17 +211,18 @@ updateCell AppState {..} coord inputValue = do
                     cellDisplay = displayText
                   }
 
+          let statsCfg = configStats appConfig
           atomically $ do
             modifyTVar' appGrid (Map.insert coord newCell)
             modifyTVar' appStats $ \s ->
               s
                 { statsOperations = statsOperations s + 1,
-                  statsTokensEstimate = statsTokensEstimate s + 300, -- Rough estimate
-                  statsCostEstimate = statsCostEstimate s + 0.003 -- Rough estimate
+                  statsTokensEstimate = statsTokensEstimate s + statsTokensPerOp statsCfg,
+                  statsCostEstimate = statsCostEstimate s + statsCostPerOp statsCfg
                 }
 
           -- Recalculate cells that depend on this one
-          recalculateDependents appEnv appGrid appStats coord
+          recalculateDependents appEnv appGrid appStats appConfig coord
 
           updatedGrid <- readTVarIO appGrid
           stats <- readTVarIO appStats
@@ -229,7 +255,7 @@ updateCell AppState {..} coord inputValue = do
           atomically $ modifyTVar' appGrid (Map.insert coord newCell)
 
           -- Recalculate cells that depend on this one
-          recalculateDependents appEnv appGrid appStats coord
+          recalculateDependents appEnv appGrid appStats appConfig coord
 
           updatedGrid <- readTVarIO appGrid
           stats <- readTVarIO appStats
@@ -243,8 +269,8 @@ updateCell AppState {..} coord inputValue = do
               ]
 
 -- Recalculate all cells that depend on the changed cell
-recalculateDependents :: ClonadEnv -> TVar Grid -> TVar Stats -> Coord -> IO ()
-recalculateDependents env gridVar statsVar changedCoord = do
+recalculateDependents :: ClonadEnv -> TVar Grid -> TVar Stats -> Config -> Coord -> IO ()
+recalculateDependents env gridVar statsVar cfg changedCoord = do
   grid <- readTVarIO gridVar
   let dependents = nub $ findDependentCells changedCoord grid
   putStrLn $ "Changed cell: " ++ show changedCoord
@@ -253,10 +279,10 @@ recalculateDependents env gridVar statsVar changedCoord = do
   let formulas = [(c, f) | (c, cell) <- Map.toList grid, Just f <- [cellFormula cell]]
   putStrLn $ "All formulas in grid: " ++ show formulas
   -- Recalculate each dependent cell
-  mapM_ (recalculateCell env gridVar statsVar) dependents
+  mapM_ (recalculateCell env gridVar statsVar cfg) dependents
 
-recalculateCell :: ClonadEnv -> TVar Grid -> TVar Stats -> Coord -> IO ()
-recalculateCell env gridVar statsVar coord = do
+recalculateCell :: ClonadEnv -> TVar Grid -> TVar Stats -> Config -> Coord -> IO ()
+recalculateCell env gridVar statsVar cfg coord = do
   grid <- readTVarIO gridVar
   case Map.lookup coord grid of
     Nothing -> putStrLn $ "  Cell " ++ show coord ++ " not found in grid"
@@ -287,13 +313,14 @@ recalculateCell env gridVar statsVar coord = do
         putStrLn $ "Result: " ++ T.unpack displayText
         putStrLn "==========================================="
         let newCell = cell {cellValue = result, cellDisplay = displayText}
+            statsCfg = configStats cfg
         atomically $ do
           modifyTVar' gridVar (Map.insert coord newCell)
           modifyTVar' statsVar $ \s ->
             s
               { statsOperations = statsOperations s + 1,
-                statsTokensEstimate = statsTokensEstimate s + 300,
-                statsCostEstimate = statsCostEstimate s + 0.003
+                statsTokensEstimate = statsTokensEstimate s + statsTokensPerOp statsCfg,
+                statsCostEstimate = statsCostEstimate s + statsCostPerOp statsCfg
               }
 
 showNumber :: Double -> String
@@ -307,7 +334,7 @@ recalculateAll AppState {..} = do
   let formulaCells = [(coord, cell) | (coord, cell) <- Map.toList grid, isFormulaCell cell]
 
   -- Evaluate each formula cell (the API call storm)
-  newGrid <- foldlM (recalcCell appEnv appStats) grid formulaCells
+  newGrid <- foldlM (recalcCell appEnv appStats appConfig) grid formulaCells
 
   atomically $ writeTVar appGrid newGrid
   stats <- readTVarIO appStats
@@ -330,8 +357,8 @@ recalculateAll AppState {..} = do
       z' <- f z x
       foldlM f z' xs
 
-recalcCell :: ClonadEnv -> TVar Stats -> Grid -> (Coord, Cell) -> IO Grid
-recalcCell env statsVar grid (coord, cell) = do
+recalcCell :: ClonadEnv -> TVar Stats -> Config -> Grid -> (Coord, Cell) -> IO Grid
+recalcCell env statsVar cfg grid (coord, cell) = do
   case cellFormula cell of
     Nothing -> pure grid
     Just formula -> do
@@ -349,13 +376,14 @@ recalcCell env statsVar grid (coord, cell) = do
               { cellValue = result,
                 cellDisplay = displayText
               }
+          statsCfg = configStats cfg
 
       atomically $
         modifyTVar' statsVar $ \s ->
           s
             { statsOperations = statsOperations s + 1,
-              statsTokensEstimate = statsTokensEstimate s + 300,
-              statsCostEstimate = statsCostEstimate s + 0.003
+              statsTokensEstimate = statsTokensEstimate s + statsTokensPerOp statsCfg,
+              statsCostEstimate = statsCostEstimate s + statsCostPerOp statsCfg
             }
 
       pure $ Map.insert coord newCell grid
