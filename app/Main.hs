@@ -6,11 +6,14 @@ module Main where
 import Clonad (ClonadEnv, defaultEnv, runClonad, withTemperature)
 import Config
 import Control.Concurrent.STM
+import Control.Monad (forM_)
 import Data.Aeson (object, (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Data.List (nub)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as TL
@@ -18,9 +21,6 @@ import Network.HTTP.Types.Status (status400)
 import Network.Wai.Middleware.RequestLogger (logStdoutDev)
 import Network.Wai.Middleware.Static (addBase, staticPolicy)
 import Spreadsheet
-import Data.Maybe (fromMaybe)
-import Data.List (nub)
-import Control.Monad (forM_)
 import System.Directory (doesFileExist)
 import Web.Scotty
 
@@ -51,7 +51,7 @@ data AppState = AppState
 
 main :: IO ()
 main = do
-  putStrLn "ClonadSheet - Every formula evaluation is a prayer."
+  putStrLn "Clonadic - Every formula evaluation is a prayer."
 
   cfg <- loadConfigWithFallback "config.toml"
   let port = serverPort (configServer cfg)

@@ -1,5 +1,5 @@
 {
-  description = "ClonadSheet - A spreadsheet where Claude evaluates every formula";
+  description = "Clonadic - A spreadsheet where Claude evaluates every formula";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -18,25 +18,25 @@
         haskellPackages = pkgs.haskellPackages.override {
           overrides = final: prev: {
             clonad = clonad.packages.${system}.clonad;
-            clonad-demo = final.callCabal2nix "clonad-demo" ./. { };
+            clonadic = final.callCabal2nix "clonadic" ./. { };
           };
         };
 
-        clonad-demo = haskellPackages.clonad-demo;
+        clonadic = haskellPackages.clonadic;
       in
       {
         packages = {
-          default = clonad-demo;
-          clonad-demo = clonad-demo;
+          default = clonadic;
+          clonadic = clonadic;
         };
 
         apps.default = {
           type = "app";
-          program = "${clonad-demo}/bin/clonad-demo";
+          program = "${clonadic}/bin/clonadic";
         };
 
         devShells.default = haskellPackages.shellFor {
-          packages = p: [ p.clonad-demo ];
+          packages = p: [ p.clonadic ];
           buildInputs = with haskellPackages; [
             cabal-install
             haskell-language-server

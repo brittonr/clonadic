@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ClonadSheet is an experimental spreadsheet where an LLM  evaluates every formula instead of a traditional formula engine. Built for a Jane Street Hackathon.
+Clonadic is an experimental spreadsheet where an LLM evaluates every formula instead of a traditional formula engine. Built for a Jane Street Hackathon.
 
 ## Build & Run Commands
 
@@ -16,7 +16,7 @@ nix develop
 cabal build
 
 # Run (starts server on http://localhost:8080)
-cabal run clonad-demo
+cabal run clonadic
 # or: nix run
 
 # Format code
@@ -26,7 +26,7 @@ nix fmt
 hlint src/ app/
 
 # Auto-recompile on save
-ghcid --command="cabal repl clonad-demo"
+ghcid --command="cabal repl clonadic"
 ```
 
 ## Architecture

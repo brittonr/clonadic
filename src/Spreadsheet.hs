@@ -53,8 +53,8 @@ import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
-import GHC.Generics (Generic)
 import Debug.Trace (trace)
+import GHC.Generics (Generic)
 
 type Coord = (Int, Int) -- (row, col), 1-indexed
 
@@ -153,9 +153,10 @@ evaluateFormula formulaText grid = do
       refs = extractCellRefs formula
       cellValues = [(coordToRef coord, getCellNumericValue coord grid) | coord <- refs]
       nonEmpty = [(ref, v) | (ref, Just v) <- cellValues]
-      valuesText = if null nonEmpty
-                   then "All cells are empty (value 0)"
-                   else T.intercalate ", " [ref <> "=" <> T.pack (show v) | (ref, v) <- nonEmpty]
+      valuesText =
+        if null nonEmpty
+          then "All cells are empty (value 0)"
+          else T.intercalate ", " [ref <> "=" <> T.pack (show v) | (ref, v) <- nonEmpty]
   result <-
     clonad @(Text, Text) @Text
       ( T.unlines
@@ -202,7 +203,7 @@ gridContext grid =
     displayValue (CellNumber n) = T.pack (show n)
     displayValue (CellText t) = "\"" <> t <> "\""
     displayValue (CellBoolean b) = if b then "TRUE" else "FALSE"
-    displayValue (CellError _) = "<error>"  -- Shouldn't reach here due to filter
+    displayValue (CellError _) = "<error>" -- Shouldn't reach here due to filter
 
 -- Exported version of gridContext for debugging
 gridContextText :: Grid -> Text
@@ -215,11 +216,13 @@ evaluateFormulaWithLogging formulaText grid = do
       refs = extractCellRefs formula
       cellValues = [(coordToRef coord, getCellNumericValue coord grid) | coord <- refs]
       nonEmpty = [(ref, v) | (ref, Just v) <- cellValues]
-      valuesText = if null nonEmpty
-                   then "All cells are empty (value 0)"
-                   else T.intercalate ", " [ref <> "=" <> T.pack (show v) | (ref, v) <- nonEmpty]
+      valuesText =
+        if null nonEmpty
+          then "All cells are empty (value 0)"
+          else T.intercalate ", " [ref <> "=" <> T.pack (show v) | (ref, v) <- nonEmpty]
       inputText = formula <> " with " <> valuesText
-      systemPrompt = T.unlines
+      systemPrompt =
+        T.unlines
           [ "Evaluate this spreadsheet formula. Return ONLY the numeric answer.",
             "",
             "Rules:",
@@ -233,8 +236,15 @@ evaluateFormulaWithLogging formulaText grid = do
             "=2+2 -> 4"
           ]
   -- Log the full prompt
-  let _ = trace ("\n=== LLM PROMPT ===\nSystem: " ++ T.unpack systemPrompt ++
-                 "\nInput: " ++ T.unpack inputText ++ "\n=================") ()
+  let _ =
+        trace
+          ( "\n=== LLM PROMPT ===\nSystem: "
+              ++ T.unpack systemPrompt
+              ++ "\nInput: "
+              ++ T.unpack inputText
+              ++ "\n================="
+          )
+          ()
   result <- clonad @(Text, Text) @Text systemPrompt (inputText, "")
   -- Log the response
   let _ = trace ("\n=== LLM RESPONSE ===\n" ++ T.unpack result ++ "\n====================") ()
@@ -251,15 +261,18 @@ parseResult t =
       upper = T.toUpper stripped
    in if T.null stripped
         then CellEmpty
-        else if "ERROR:" `T.isPrefixOf` upper || "ERROR " `T.isPrefixOf` upper
-          then CellError (T.strip $ T.drop 6 stripped)
-        else if upper == "TRUE"
-          then CellBoolean True
-        else if upper == "FALSE"
-          then CellBoolean False
-        else case reads (T.unpack stripped) of
-          [(n, "")] -> CellNumber n
-          _ -> CellText stripped  -- Default to text, not error!
+        else
+          if "ERROR:" `T.isPrefixOf` upper || "ERROR " `T.isPrefixOf` upper
+            then CellError (T.strip $ T.drop 6 stripped)
+            else
+              if upper == "TRUE"
+                then CellBoolean True
+                else
+                  if upper == "FALSE"
+                    then CellBoolean False
+                    else case reads (T.unpack stripped) of
+                      [(n, "")] -> CellNumber n
+                      _ -> CellText stripped -- Default to text, not error!
 
 -- Autocomplete functionality
 
