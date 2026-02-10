@@ -5,7 +5,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     clonad = {
-      url = "path:/home/brittonr/git/clonad";
+      url = "github:brittonr/clonad";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -47,7 +47,7 @@
           withHoogle = true;
 
           OLLAMA_HOST = "http://localhost:11434";
-          CLONAD_MODEL = "qwen2.5:0.5b";
+          CLONAD_MODEL = "qwen2.5:3b";
 
           shellHook = ''
             # Start Ollama in background if not running
@@ -58,12 +58,12 @@
             fi
 
             # Pull the model if not present
-            if ! ollama list 2>/dev/null | grep -q "qwen2.5:0.5b"; then
-              echo "Pulling qwen2.5:0.5b model (small, ~400MB)..."
-              ollama pull qwen2.5:0.5b
+            if ! ollama list 2>/dev/null | grep -q "qwen2.5:3b"; then
+              echo "Pulling qwen2.5:3b model (~2GB)..."
+              ollama pull qwen2.5:3b
             fi
 
-            echo "Ollama ready with qwen2.5:0.5b model"
+            echo "Ollama ready with qwen2.5:3b model"
             echo "OLLAMA_HOST=$OLLAMA_HOST"
             echo "CLONAD_MODEL=$CLONAD_MODEL"
           '';

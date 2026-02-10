@@ -8,14 +8,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1770686764,
-        "narHash": "sha256-kghWt+l++sKxDx7BshffeeMko5RhvDjgGLhr+5Cq/bA=",
-        "path": "/home/brittonr/git/clonad",
-        "type": "path"
+        "lastModified": 1770762712,
+        "narHash": "sha256-9CT1JxcwmTyr2MQMrgCyqv4hdmn3KSHdVnkZ76SmMbg=",
+        "owner": "brittonr",
+        "repo": "clonad",
+        "rev": "a97021520d7c2cb0be9f863290fa826cec4e0da5",
+        "type": "github"
       },
       "original": {
-        "path": "/home/brittonr/git/clonad",
-        "type": "path"
+        "owner": "brittonr",
+        "repo": "clonad",
+        "type": "github"
       }
     },
     "flake-utils": {

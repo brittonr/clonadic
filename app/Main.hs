@@ -3,7 +3,7 @@
 
 module Main where
 
-import Clonad (ClonadEnv, mkEnv, mkOllamaEnv, mkOpenAIEnv, runClonad, withTemperature)
+import Clonad (ApiKey, ClonadEnv, ModelId, mkEnv, mkOllamaEnv, mkOpenAIEnv, runClonad, withTemperature)
 import Config (Config (..), GridConfig (..), LlmConfig (..), LlmProvider (..), ServerConfig (..), StatsConfig (..), defaultConfig, loadConfig)
 import Control.Concurrent.STM
 import Control.Monad (forM_)
@@ -14,6 +14,7 @@ import Data.Aeson.KeyMap qualified as KM
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
+import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as TL
@@ -54,12 +55,14 @@ mkClonadEnvFromConfig :: LlmConfig -> ClonadEnv
 mkClonadEnvFromConfig llmCfg = case llmProvider llmCfg of
   Ollama ->
     let baseUrl = fromMaybe "http://localhost:11434" (llmBaseUrl llmCfg)
-     in mkOllamaEnv baseUrl (llmModel llmCfg)
+        modelId = fromString (T.unpack (llmModel llmCfg)) :: ModelId
+     in mkOllamaEnv baseUrl modelId
   OpenAI ->
-    let apiKey = fromMaybe "" (llmApiKey llmCfg)
-     in mkOpenAIEnv apiKey (llmModel llmCfg) (llmBaseUrl llmCfg)
+    let apiKey = fromString (T.unpack (fromMaybe "" (llmApiKey llmCfg))) :: ApiKey
+        modelId = fromString (T.unpack (llmModel llmCfg)) :: ModelId
+     in mkOpenAIEnv apiKey modelId (llmBaseUrl llmCfg)
   Anthropic ->
-    let apiKey = fromMaybe "" (llmApiKey llmCfg)
+    let apiKey = fromString (T.unpack (fromMaybe "" (llmApiKey llmCfg))) :: ApiKey
      in mkEnv apiKey
 
 main :: IO ()
