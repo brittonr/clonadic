@@ -3,7 +3,12 @@ host = "localhost"
 port = 8080
 
 [llm]
-ollama_host = "http://localhost:11434"
+# Provider: "ollama", "openai", or "anthropic"
+provider = "ollama"
+# Base URL for Ollama or custom OpenAI-compatible endpoints
+base_url = "http://localhost:11434"
+# API key for OpenAI or Anthropic (not needed for Ollama)
+# api_key = "sk-..."
 model = "qwen2.5:0.5b"
 temperature = 0.0
 

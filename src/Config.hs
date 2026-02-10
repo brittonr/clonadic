@@ -5,6 +5,7 @@ module Config
   ( Config (..),
     ServerConfig (..),
     LlmConfig (..),
+    LlmProvider (..),
     StatsConfig (..),
     GridConfig (..),
     loadConfig,
@@ -33,8 +34,13 @@ data ServerConfig = ServerConfig
   }
   deriving (Show, Eq, Generic)
 
+data LlmProvider = Ollama | OpenAI | Anthropic
+  deriving (Show, Eq, Generic)
+
 data LlmConfig = LlmConfig
-  { llmOllamaHost :: Text,
+  { llmProvider :: LlmProvider,
+    llmBaseUrl :: Maybe Text, -- Ollama host or custom OpenAI endpoint
+    llmApiKey :: Maybe Text, -- API key for OpenAI/Anthropic
     llmModel :: Text,
     llmTemperature :: Double
   }
@@ -62,7 +68,9 @@ defaultConfig =
           },
       configLlm =
         LlmConfig
-          { llmOllamaHost = "http://localhost:11434",
+          { llmProvider = Ollama,
+            llmBaseUrl = Just "http://localhost:11434",
+            llmApiKey = Nothing,
             llmModel = "qwen2.5:0.5b",
             llmTemperature = 0.0
           },
@@ -84,10 +92,26 @@ serverCodec =
     <$> Toml.text "host" .= serverHost
     <*> Toml.int "port" .= serverPort
 
+providerCodec :: Toml.Key -> TomlCodec LlmProvider
+providerCodec key = Toml.textBy fromProvider toProvider key
+  where
+    toProvider :: Text -> Either Text LlmProvider
+    toProvider "ollama" = Right Ollama
+    toProvider "openai" = Right OpenAI
+    toProvider "anthropic" = Right Anthropic
+    toProvider other = Left $ "Unknown provider: " <> other <> ". Expected: ollama, openai, or anthropic"
+
+    fromProvider :: LlmProvider -> Text
+    fromProvider Ollama = "ollama"
+    fromProvider OpenAI = "openai"
+    fromProvider Anthropic = "anthropic"
+
 llmCodec :: TomlCodec LlmConfig
 llmCodec =
   LlmConfig
-    <$> Toml.text "ollama_host" .= llmOllamaHost
+    <$> providerCodec "provider" .= llmProvider
+    <*> Toml.dioptional (Toml.text "base_url") .= llmBaseUrl
+    <*> Toml.dioptional (Toml.text "api_key") .= llmApiKey
     <*> Toml.text "model" .= llmModel
     <*> Toml.double "temperature" .= llmTemperature
 

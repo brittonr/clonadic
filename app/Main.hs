@@ -3,8 +3,8 @@
 
 module Main where
 
-import Clonad (ClonadEnv, defaultEnv, runClonad, withTemperature)
-import Config
+import Clonad (ClonadEnv, mkEnv, mkOllamaEnv, mkOpenAIEnv, runClonad, withTemperature)
+import Config (Config (..), GridConfig (..), LlmConfig (..), LlmProvider (..), ServerConfig (..), StatsConfig (..), defaultConfig, loadConfig)
 import Control.Concurrent.STM
 import Control.Monad (forM_)
 import Data.Aeson (object, (.=))
@@ -49,15 +49,31 @@ data AppState = AppState
     appConfig :: Config
   }
 
+-- Create ClonadEnv from config
+mkClonadEnvFromConfig :: LlmConfig -> ClonadEnv
+mkClonadEnvFromConfig llmCfg = case llmProvider llmCfg of
+  Ollama ->
+    let baseUrl = fromMaybe "http://localhost:11434" (llmBaseUrl llmCfg)
+     in mkOllamaEnv baseUrl (llmModel llmCfg)
+  OpenAI ->
+    let apiKey = fromMaybe "" (llmApiKey llmCfg)
+     in mkOpenAIEnv apiKey (llmModel llmCfg) (llmBaseUrl llmCfg)
+  Anthropic ->
+    let apiKey = fromMaybe "" (llmApiKey llmCfg)
+     in mkEnv apiKey
+
 main :: IO ()
 main = do
   putStrLn "Clonadic - Every formula evaluation is a prayer."
 
   cfg <- loadConfigWithFallback "config.toml"
   let port = serverPort (configServer cfg)
+      llmCfg = configLlm cfg
   putStrLn $ "Starting server on http://" ++ T.unpack (serverHost (configServer cfg)) ++ ":" ++ show port
+  putStrLn $ "LLM Provider: " ++ show (llmProvider llmCfg)
+  putStrLn $ "LLM Model: " ++ T.unpack (llmModel llmCfg)
 
-  env <- defaultEnv
+  let env = mkClonadEnvFromConfig llmCfg
   gridVar <- newTVarIO emptyGrid
   statsVar <- newTVarIO emptyStats
 
