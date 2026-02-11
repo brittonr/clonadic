@@ -209,6 +209,11 @@
       color: var(--success);
     }
 
+    .cell.natural-language {
+      color: #8b5cf6;
+      font-style: italic;
+    }
+
     .cell.loading {
       color: var(--text-dim);
       font-style: italic;
@@ -255,6 +260,19 @@
     .formula-bar.point-mode #formula-input {
       border-color: var(--accent);
       box-shadow: 0 0 0 1px var(--accent);
+    }
+
+    /* Natural language mode styling */
+    .formula-bar.natural-language-mode #formula-input {
+      border-color: #8b5cf6;
+      background: rgba(139, 92, 246, 0.1);
+    }
+
+    .formula-bar.natural-language-mode .cell-ref::after {
+      content: ' (ask anything)';
+      font-size: 10px;
+      color: #8b5cf6;
+      font-weight: normal;
     }
 
     /* Range selection start marker during point mode */
@@ -511,6 +529,11 @@
       color: #a855f7;
     }
 
+    .autocomplete-type.nl {
+      background: rgba(139, 92, 246, 0.3);
+      color: #8b5cf6;
+    }
+
     .autocomplete-desc {
       font-size: 12px;
       color: var(--text-dim);
@@ -616,7 +639,7 @@
     <label>fx</label>
     <div class="cell-ref" id="cell-ref">A1</div>
     <div class="autocomplete-container">
-      <input type="text" id="formula-input" placeholder="Enter a value or formula (=... then click cells to insert references)" autocomplete="off">
+      <input type="text" id="formula-input" placeholder="Value, formula (=SUM...), or question (=what's the total?)" autocomplete="off">
       <div class="autocomplete-dropdown" id="autocomplete-dropdown">
         <div class="autocomplete-hint">Type = to start a formula, then type function names or cell references</div>
       </div>
@@ -649,7 +672,7 @@
       <div class="stat">Tokens: <span class="stat-value" id="stat-tokens">~0</span></div>
       <div class="stat">Est. cost: <span class="stat-value" id="stat-cost">~$0.00</span></div>
     </div>
-    <div class="tagline">"Every formula evaluation is a prayer."</div>
+    <div class="tagline">"Every formula is a prayer to the LLM. And it answers in natural language."</div>
   </footer>
 
   <div class="loading-indicator" id="loading">
@@ -821,11 +844,27 @@
       input.addEventListener('blur', () => setTimeout(exitPointMode, 100));
     }
 
+    function isNaturalLanguageFormula(value) {
+      if (!value.startsWith('=')) return false;
+      const formula = value.substring(1).trim().toLowerCase();
+      const hasQuestionWord = /^(what|how|calculate|compute|find|is |are |convert|show|tell|give)/.test(formula);
+      const hasTraditionalPattern = /(sum|average|if|vlookup|count|min|max|concat)\s*\(/.test(formula);
+      const wordCount = formula.split(/\s+/).length;
+      return (hasQuestionWord || wordCount > 4) && !hasTraditionalPattern;
+    }
+
+    function updateFormulaBarMode() {
+      const input = $('formula-input');
+      const bar = document.querySelector('.formula-bar');
+      bar.classList.toggle('natural-language-mode', isNaturalLanguageFormula(input.value));
+    }
+
     function updatePointMode() {
       const input = $('formula-input'), val = input.value, was = isInPointMode;
       isInPointMode = val.startsWith('=') && document.activeElement === input;
       if (isInPointMode !== was) isInPointMode ? enterPointMode() : exitPointMode();
       if (isInPointMode) highlightFormulaReferences(val);
+      updateFormulaBarMode();
     }
 
     function enterPointMode() {
@@ -1304,10 +1343,12 @@
 
     function renderAutocompleteDropdown() {
       const dropdown = $('autocomplete-dropdown');
-      if (!autocompleteSuggestions.length) { dropdown.innerHTML = '<div class="autocomplete-hint">Type function names (SUM, IF, AVERAGE) or cell references (A1, B2)</div>'; dropdown.classList.add('active'); return; }
+      if (!autocompleteSuggestions.length) { dropdown.innerHTML = '<div class="autocomplete-hint">Type function names (SUM, IF, AVERAGE), cell references (A1, B2), or questions in natural language</div>'; dropdown.classList.add('active'); return; }
       dropdown.innerHTML = autocompleteSuggestions.map((s, i) => {
-        const tc = s.suggestionType === 'SuggestionFunction' ? 'function' : s.suggestionType === 'SuggestionCell' ? 'cell' : 'range';
-        const tl = s.suggestionType === 'SuggestionFunction' ? 'fn' : s.suggestionType === 'SuggestionCell' ? 'cell' : 'range';
+        // Check if this is a natural language pattern (indicated by description containing "Natural Language" patterns)
+        const isNL = s.suggestionType === 'SuggestionFunction' && /natural|question|ask|convert/.test(s.suggestionDescription.toLowerCase());
+        const tc = isNL ? 'nl' : s.suggestionType === 'SuggestionFunction' ? 'function' : s.suggestionType === 'SuggestionCell' ? 'cell' : 'range';
+        const tl = isNL ? 'ask' : s.suggestionType === 'SuggestionFunction' ? 'fn' : s.suggestionType === 'SuggestionCell' ? 'cell' : 'range';
         return `<div class="autocomplete-item${i === autocompleteSelectedIndex ? ' selected' : ''}" onclick="applyAutocompleteSuggestion(${i})"><div class="autocomplete-main"><span class="autocomplete-text">${escapeHtml(s.suggestionDisplay)}</span><span class="autocomplete-type ${tc}">${tl}</span></div><div class="autocomplete-desc">${escapeHtml(s.suggestionDescription)}</div></div>`;
       }).join('') + '<div class="autocomplete-hint">Tab to fill, Enter to submit, Esc to close</div>';
       dropdown.classList.add('active');
@@ -1459,8 +1500,11 @@
           const [row, col] = key.split(',').map(Number), el = getCellElement(row, col);
           if (el) {
             el.textContent = d.display || '';
-            el.classList.remove('formula', 'error', 'boolean', 'text');
-            if (d.formula) el.classList.add('formula');
+            el.classList.remove('formula', 'error', 'boolean', 'text', 'natural-language');
+            if (d.formula) {
+              el.classList.add('formula');
+              if (isNaturalLanguageFormula(d.formula)) el.classList.add('natural-language');
+            }
             if (d.value?.tag === 'CellError') el.classList.add('error');
             else if (d.value?.tag === 'CellBoolean') el.classList.add('boolean');
             else if (d.value?.tag === 'CellText' && d.formula) el.classList.add('text');

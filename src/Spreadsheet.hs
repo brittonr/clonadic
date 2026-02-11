@@ -41,6 +41,7 @@ module Spreadsheet
     -- * Formula Evaluation (via Claude)
     evaluateFormula,
     isFormula,
+    isNaturalLanguage,
 
     -- * Stats
     emptyStats,
@@ -301,9 +302,76 @@ refToCoord = either (const Nothing) Just . A.parseOnly (coordP <* A.endOfInput) 
 isFormula :: Text -> Bool
 isFormula t = T.isPrefixOf "=" (T.strip t)
 
+-- | Detect if a formula appears to be natural language rather than traditional spreadsheet syntax
+isNaturalLanguage :: Text -> Bool
+isNaturalLanguage formula =
+  let stripped = T.toLower $ T.strip formula
+      hasQuestionWord =
+        any
+          (`T.isPrefixOf` stripped)
+          ["what", "how", "calculate", "compute", "find", "is ", "are ", "convert", "show", "tell", "give"]
+      hasTraditionalPattern =
+        any
+          (\f -> T.toUpper f `T.isInfixOf` T.toUpper stripped)
+          ["SUM(", "AVERAGE(", "IF(", "VLOOKUP(", "COUNT(", "MIN(", "MAX(", "CONCAT("]
+      wordCount = length $ T.words stripped
+   in (hasQuestionWord || wordCount > 4) && not hasTraditionalPattern
+
 -- | Evaluate a formula using the LLM
 evaluateFormula :: Text -> Grid -> Clonad CellValue
 evaluateFormula formulaText grid = do
+  let formula = T.drop 1 $ T.strip formulaText -- Remove leading =
+  if isNaturalLanguage formula
+    then evaluateNaturalLanguage formula grid
+    else evaluateTraditionalFormula formulaText grid
+
+-- | Evaluate a natural language request
+evaluateNaturalLanguage :: Text -> Grid -> Clonad CellValue
+evaluateNaturalLanguage request grid = do
+  let nlContext = buildNLGridContext grid
+  result <-
+    clonad @(Text, Text) @Text
+      ( T.unlines
+          [ "You are a spreadsheet assistant. Interpret this natural language request.",
+            "Analyze the request and spreadsheet data, then compute the answer.",
+            "",
+            "Rules:",
+            "- Return ONLY the computed result (number, text, or TRUE/FALSE)",
+            "- For numeric results, return just the number",
+            "- If unclear or impossible, return ERROR: <reason>",
+            "",
+            "Examples:",
+            "\"what's the sum of all values?\" with A1=100, A2=200 -> 300",
+            "\"is A1 greater than B1?\" with A1=50, B1=30 -> TRUE",
+            "\"convert A1 from celsius to fahrenheit\" with A1=100 -> 212",
+            "\"what percent is A1 of B1?\" with A1=25, B1=100 -> 25",
+            "\"is C1 a prime number?\" with C1=17 -> TRUE"
+          ]
+      )
+      (request, nlContext)
+  pure $ parseResult result
+
+-- | Build a richer grid context for natural language evaluation
+buildNLGridContext :: Grid -> Text
+buildNLGridContext grid
+  | null cellInfo = "The spreadsheet is empty."
+  | otherwise = T.intercalate ", " cellInfo
+  where
+    cellInfo =
+      [ coordToRef coord <> "=" <> formatCellForContext cell
+      | (coord, cell) <- gridToList grid,
+        cellValue cell /= CellEmpty
+      ]
+
+    formatCellForContext cell = case cellValue cell of
+      CellNumber n -> T.pack (showNumber n)
+      CellText t -> "\"" <> t <> "\""
+      CellBoolean b -> if b then "TRUE" else "FALSE"
+      _ -> ""
+
+-- | Evaluate a traditional spreadsheet formula
+evaluateTraditionalFormula :: Text -> Grid -> Clonad CellValue
+evaluateTraditionalFormula formulaText grid = do
   let formula = T.strip formulaText
       refs = extractCellRefs formula
       nonEmpty = mapMaybe (\coord -> (coordToRef coord,) <$> getCellNumericValue coord grid) refs
@@ -476,10 +544,22 @@ dateFunctions =
     FormulaFunction "DAY" "DAY(date)" "Extracts day from date" "Date"
   ]
 
+-- | Natural language patterns for intuitive formula entry
+nlPatterns :: [FormulaFunction]
+nlPatterns =
+  [ FormulaFunction "what is" "what is..." "Ask a question about data" "Natural Language",
+    FormulaFunction "sum of" "sum of A1 to A5" "Calculate sum naturally" "Natural Language",
+    FormulaFunction "is...greater" "is A1 greater than B1?" "Compare values" "Natural Language",
+    FormulaFunction "convert" "convert A1 from X to Y" "Unit conversion" "Natural Language",
+    FormulaFunction "is...prime" "is A1 a prime number?" "Check if prime" "Natural Language",
+    FormulaFunction "what percent" "what percent is A1 of B1?" "Calculate percentage" "Natural Language"
+  ]
+
 -- | All supported formula functions, combined using Semigroup
 formulaFunctions :: [FormulaFunction]
 formulaFunctions =
-  mathFunctions
+  nlPatterns -- Natural language patterns at top for visibility
+    <> mathFunctions
     <> logicFunctions
     <> textFunctions
     <> lookupFunctions
