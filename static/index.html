@@ -523,6 +523,84 @@
       background: var(--bg);
       border-top: 1px solid var(--border);
     }
+
+    /* Context Menu Styles */
+    .context-menu {
+      position: fixed;
+      z-index: 2000;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      min-width: 180px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      display: none;
+      padding: 4px 0;
+    }
+
+    .context-menu.active {
+      display: block;
+    }
+
+    .context-menu-item {
+      padding: 8px 16px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      color: var(--text);
+      transition: background 0.1s;
+    }
+
+    .context-menu-item:hover {
+      background: rgba(59, 130, 246, 0.2);
+    }
+
+    .context-menu-item.disabled {
+      color: var(--text-dim);
+      cursor: not-allowed;
+    }
+
+    .context-menu-item.disabled:hover {
+      background: transparent;
+    }
+
+    .context-menu-item .shortcut {
+      color: var(--text-dim);
+      font-size: 11px;
+      margin-left: 24px;
+    }
+
+    .context-menu-divider {
+      height: 1px;
+      background: var(--border);
+      margin: 4px 0;
+    }
+
+    .context-menu-submenu {
+      position: relative;
+    }
+
+    .context-menu-submenu::after {
+      content: '\25B6';
+      font-size: 8px;
+      color: var(--text-dim);
+    }
+
+    .context-menu-submenu .context-submenu {
+      position: absolute;
+      left: 100%;
+      top: -4px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      min-width: 160px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      display: none;
+      padding: 4px 0;
+    }
+
+    .context-menu-submenu:hover .context-submenu {
+      display: block;
+    }
   </style>
 </head>
 <body>
@@ -578,6 +656,59 @@
     <div class="spinner">Claude is computing...</div>
   </div>
 
+  <!-- Context Menu -->
+  <div class="context-menu" id="context-menu">
+    <div class="context-menu-item" data-action="cut">
+      <span>Cut</span>
+      <span class="shortcut">Ctrl+X</span>
+    </div>
+    <div class="context-menu-item" data-action="copy">
+      <span>Copy</span>
+      <span class="shortcut">Ctrl+C</span>
+    </div>
+    <div class="context-menu-item" data-action="paste">
+      <span>Paste</span>
+      <span class="shortcut">Ctrl+V</span>
+    </div>
+    <div class="context-menu-divider"></div>
+    <div class="context-menu-item" data-action="clear">
+      <span>Clear Contents</span>
+      <span class="shortcut">Del</span>
+    </div>
+    <div class="context-menu-divider"></div>
+    <div class="context-menu-item context-menu-submenu" data-action="insert">
+      <span>Insert</span>
+      <div class="context-submenu">
+        <div class="context-menu-item" data-action="insert-row-above">Insert Row Above</div>
+        <div class="context-menu-item" data-action="insert-row-below">Insert Row Below</div>
+        <div class="context-menu-item" data-action="insert-col-left">Insert Column Left</div>
+        <div class="context-menu-item" data-action="insert-col-right">Insert Column Right</div>
+      </div>
+    </div>
+    <div class="context-menu-item context-menu-submenu" data-action="delete">
+      <span>Delete</span>
+      <div class="context-submenu">
+        <div class="context-menu-item" data-action="delete-row">Delete Row</div>
+        <div class="context-menu-item" data-action="delete-col">Delete Column</div>
+      </div>
+    </div>
+    <div class="context-menu-divider"></div>
+    <div class="context-menu-item" data-action="select-row">
+      <span>Select Row</span>
+    </div>
+    <div class="context-menu-item" data-action="select-col">
+      <span>Select Column</span>
+    </div>
+    <div class="context-menu-item" data-action="select-all">
+      <span>Select All</span>
+      <span class="shortcut">Ctrl+A</span>
+    </div>
+    <div class="context-menu-divider"></div>
+    <div class="context-menu-item" data-action="recalculate">
+      <span>Recalculate Cell</span>
+    </div>
+  </div>
+
   <div class="about-modal" id="about-modal">
     <div class="about-content">
       <h2>Clonadic</h2>
@@ -612,6 +743,7 @@
     let autocompleteSelectedIndex = -1, autocompleteSuggestions = [], autocompleteDebounceTimer = null;
     let isInPointMode = false, pointModeRangeStart = null, pointModeNavPosition = null;
     let clipboard = null, isDragToMove = false, dragMoveStart = null;
+    let contextMenuCell = null;
 
     const $ = id => document.getElementById(id);
     const $$ = sel => document.querySelectorAll(sel);
@@ -661,6 +793,7 @@
       loadGrid();
       setupAutocomplete();
       setupPointMode();
+      setupContextMenu();
       document.addEventListener('keydown', handleClipboardKeydown);
     }
 
@@ -776,6 +909,7 @@
       if (mod && e.key === 'x') { e.preventDefault(); cutSelectedCells(); }
       else if (mod && e.key === 'c') { e.preventDefault(); copySelectedCells(); }
       else if (mod && e.key === 'v') { e.preventDefault(); pasteClipboard(); }
+      else if (mod && e.key === 'a') { e.preventDefault(); selectAll(); }
       else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); clearSelectedCells(); }
     }
 
@@ -864,6 +998,261 @@
 
     function clearClipboardVisuals() { $$('.cell.cut-source, .cell.copy-source, .cell.drag-source, .cell.drop-target').forEach(c => c.classList.remove('cut-source', 'copy-source', 'drag-source', 'drop-target', 'drop-target-invalid')); }
 
+    // Context Menu Functions
+    function setupContextMenu() {
+      const menu = $('context-menu');
+
+      // Close menu on click outside
+      document.addEventListener('click', e => {
+        if (!e.target.closest('.context-menu')) hideContextMenu();
+      });
+
+      // Close menu on escape
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') hideContextMenu();
+      });
+
+      // Close menu on scroll
+      document.querySelector('.spreadsheet-container').addEventListener('scroll', hideContextMenu);
+
+      // Handle menu item clicks
+      menu.addEventListener('click', e => {
+        const item = e.target.closest('.context-menu-item');
+        if (!item || item.classList.contains('disabled')) return;
+
+        const action = item.dataset.action;
+        if (!action || action === 'insert' || action === 'delete') return; // Skip submenu triggers
+
+        handleContextMenuAction(action);
+        hideContextMenu();
+      });
+    }
+
+    function showContextMenu(e, row, col) {
+      e.preventDefault();
+
+      // Store the cell that was right-clicked
+      contextMenuCell = { row, col };
+
+      // If clicking outside current selection, select the clicked cell
+      if (!isCoordInSelection(row, col)) {
+        selectedRange = null;
+        clearSelectionVisual();
+        selectCell(row, col);
+      }
+
+      const menu = $('context-menu');
+
+      // Update menu item states
+      updateContextMenuState();
+
+      // Calculate position
+      let x = e.clientX, y = e.clientY;
+
+      // Ensure menu stays within viewport
+      const menuWidth = 180, menuHeight = menu.offsetHeight || 300;
+      if (x + menuWidth > window.innerWidth) x = window.innerWidth - menuWidth - 8;
+      if (y + menuHeight > window.innerHeight) y = window.innerHeight - menuHeight - 8;
+      if (x < 0) x = 8;
+      if (y < 0) y = 8;
+
+      menu.style.left = x + 'px';
+      menu.style.top = y + 'px';
+      menu.classList.add('active');
+    }
+
+    function hideContextMenu() {
+      $('context-menu').classList.remove('active');
+      contextMenuCell = null;
+    }
+
+    function updateContextMenuState() {
+      const menu = $('context-menu');
+      const pasteItem = menu.querySelector('[data-action="paste"]');
+
+      // Disable paste if no clipboard content
+      if (pasteItem) {
+        if (!clipboard?.cells.length) {
+          pasteItem.classList.add('disabled');
+        } else {
+          pasteItem.classList.remove('disabled');
+        }
+      }
+    }
+
+    async function handleContextMenuAction(action) {
+      switch (action) {
+        case 'cut':
+          cutSelectedCells();
+          break;
+        case 'copy':
+          copySelectedCells();
+          break;
+        case 'paste':
+          await pasteClipboard();
+          break;
+        case 'clear':
+          await clearSelectedCells();
+          break;
+        case 'select-row':
+          selectRow(contextMenuCell?.row || selectedCell.row);
+          break;
+        case 'select-col':
+          selectColumn(contextMenuCell?.col || selectedCell.col);
+          break;
+        case 'select-all':
+          selectAll();
+          break;
+        case 'insert-row-above':
+          await insertRow(contextMenuCell?.row || selectedCell.row, 'above');
+          break;
+        case 'insert-row-below':
+          await insertRow(contextMenuCell?.row || selectedCell.row, 'below');
+          break;
+        case 'insert-col-left':
+          await insertColumn(contextMenuCell?.col || selectedCell.col, 'left');
+          break;
+        case 'insert-col-right':
+          await insertColumn(contextMenuCell?.col || selectedCell.col, 'right');
+          break;
+        case 'delete-row':
+          await deleteRow(contextMenuCell?.row || selectedCell.row);
+          break;
+        case 'delete-col':
+          await deleteColumn(contextMenuCell?.col || selectedCell.col);
+          break;
+        case 'recalculate':
+          await recalculateCell(contextMenuCell?.row || selectedCell.row, contextMenuCell?.col || selectedCell.col);
+          break;
+      }
+    }
+
+    function selectRow(row) {
+      selectedRange = { startRow: row, startCol: 1, endRow: row, endCol: COLS };
+      selectedCell = { row, col: 1 };
+      clearSelectionVisual();
+      dragStart = { row: selectedRange.startRow, col: selectedRange.startCol };
+      dragEnd = { row: selectedRange.endRow, col: selectedRange.endCol };
+      updateSelectionVisual();
+      dragStart = dragEnd = null;
+      updateCellRefDisplay();
+    }
+
+    function selectColumn(col) {
+      selectedRange = { startRow: 1, startCol: col, endRow: ROWS, endCol: col };
+      selectedCell = { row: 1, col };
+      clearSelectionVisual();
+      dragStart = { row: selectedRange.startRow, col: selectedRange.startCol };
+      dragEnd = { row: selectedRange.endRow, col: selectedRange.endCol };
+      updateSelectionVisual();
+      dragStart = dragEnd = null;
+      updateCellRefDisplay();
+    }
+
+    function selectAll() {
+      selectedRange = { startRow: 1, startCol: 1, endRow: ROWS, endCol: COLS };
+      selectedCell = { row: 1, col: 1 };
+      clearSelectionVisual();
+      dragStart = { row: selectedRange.startRow, col: selectedRange.startCol };
+      dragEnd = { row: selectedRange.endRow, col: selectedRange.endCol };
+      updateSelectionVisual();
+      dragStart = dragEnd = null;
+      updateCellRefDisplay();
+    }
+
+    async function insertRow(targetRow, position) {
+      showLoading();
+      try {
+        const insertAt = position === 'below' ? targetRow + 1 : targetRow;
+        // Shift all rows down from insertAt to ROWS
+        for (let r = ROWS; r >= insertAt; r--) {
+          for (let c = 1; c <= COLS; c++) {
+            const d = cells[`${r},${c}`];
+            if (d && (d.display || d.formula)) {
+              await updateCellOnServer(r + 1, c, d.formula || d.display || '');
+            }
+          }
+        }
+        // Clear the inserted row
+        for (let c = 1; c <= COLS; c++) {
+          await updateCellOnServer(insertAt, c, '');
+        }
+        await loadGrid();
+      } catch (e) { console.error('Insert row error:', e); }
+      hideLoading();
+    }
+
+    async function insertColumn(targetCol, position) {
+      showLoading();
+      try {
+        const insertAt = position === 'right' ? targetCol + 1 : targetCol;
+        // Shift all columns right from insertAt to COLS
+        for (let c = COLS; c >= insertAt; c--) {
+          for (let r = 1; r <= ROWS; r++) {
+            const d = cells[`${r},${c}`];
+            if (d && (d.display || d.formula)) {
+              await updateCellOnServer(r, c + 1, d.formula || d.display || '');
+            }
+          }
+        }
+        // Clear the inserted column
+        for (let r = 1; r <= ROWS; r++) {
+          await updateCellOnServer(r, insertAt, '');
+        }
+        await loadGrid();
+      } catch (e) { console.error('Insert column error:', e); }
+      hideLoading();
+    }
+
+    async function deleteRow(targetRow) {
+      showLoading();
+      try {
+        // Shift all rows up from targetRow+1 to ROWS
+        for (let r = targetRow; r < ROWS; r++) {
+          for (let c = 1; c <= COLS; c++) {
+            const d = cells[`${r + 1},${c}`];
+            await updateCellOnServer(r, c, d?.formula || d?.display || '');
+          }
+        }
+        // Clear the last row
+        for (let c = 1; c <= COLS; c++) {
+          await updateCellOnServer(ROWS, c, '');
+        }
+        await loadGrid();
+      } catch (e) { console.error('Delete row error:', e); }
+      hideLoading();
+    }
+
+    async function deleteColumn(targetCol) {
+      showLoading();
+      try {
+        // Shift all columns left from targetCol+1 to COLS
+        for (let c = targetCol; c < COLS; c++) {
+          for (let r = 1; r <= ROWS; r++) {
+            const d = cells[`${r},${c + 1}`];
+            await updateCellOnServer(r, c, d?.formula || d?.display || '');
+          }
+        }
+        // Clear the last column
+        for (let r = 1; r <= ROWS; r++) {
+          await updateCellOnServer(r, COLS, '');
+        }
+        await loadGrid();
+      } catch (e) { console.error('Delete column error:', e); }
+      hideLoading();
+    }
+
+    async function recalculateCell(row, col) {
+      const d = cells[`${row},${col}`];
+      if (!d?.formula) return;
+      showLoading();
+      try {
+        await updateCellOnServer(row, col, d.formula);
+        await loadGrid();
+      } catch (e) { console.error('Recalculate error:', e); }
+      hideLoading();
+    }
+
     function startDragToMove(e, row, col) {
       if (!isCoordInSelection(row, col)) return false;
       isDragToMove = true; dragMoveStart = { row, col };
@@ -950,6 +1339,7 @@
           cell.onmousedown = e => handleCellMouseDown(e, row, col);
           cell.onmouseenter = e => handleCellMouseEnter(e, row, col);
           cell.ondblclick = () => editCell(row, col);
+          cell.oncontextmenu = e => showContextMenu(e, row, col);
           sheet.appendChild(cell);
         }
       }
