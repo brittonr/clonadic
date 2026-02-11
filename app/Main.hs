@@ -18,7 +18,6 @@ import Data.Text.IO qualified as TIO
 import Data.Text.Read qualified as TR
 import GHC.Generics (Generic)
 import Network.HTTP.Types.Status (status400)
-import Network.Wai.Middleware.RequestLogger (logStdoutDev)
 import Network.Wai.Middleware.Static (addBase, staticPolicy)
 import Spreadsheet
 import Web.Scotty
@@ -131,7 +130,6 @@ main = do
   let state = AppState gridVar statsVar env cfg
 
   scotty port $ do
-    middleware logStdoutDev
     middleware $ staticPolicy (addBase "static")
 
     get "/" $ file "static/index.html"
@@ -147,8 +145,10 @@ main = do
       case mkCoord row col of
         Nothing -> raiseApiError (InvalidCoordinate row col)
         Just coord -> do
-          result <- liftIO $ updateCell state coord value
+          (result, maybeLog) <- liftIO $ updateCellWithLog state coord value
           json result
+          -- Log AFTER response so it appears in correct order
+          liftIO $ traverse_ TIO.putStrLn maybeLog
 
     post "/api/recalculate" $ do
       result <- liftIO $ recalculateAll state
@@ -212,12 +212,12 @@ classifyCellInput t
   | isFormula t = FormulaInput t
   | otherwise = LiteralInput t
 
-updateCell :: AppState -> Coord -> Text -> IO Aeson.Value
-updateCell state coord inputValue =
+updateCellWithLog :: AppState -> Coord -> Text -> IO (Aeson.Value, Maybe Text)
+updateCellWithLog state coord inputValue =
   runApp state $ case classifyCellInput (T.strip inputValue) of
-    ClearCell -> handleClearCell coord
-    FormulaInput formula -> handleFormulaCell coord formula
-    LiteralInput value -> handleLiteralCell coord value
+    ClearCell -> (,Nothing) <$> handleClearCell coord
+    FormulaInput formula -> handleFormulaCellWithLog coord formula
+    LiteralInput value -> (,Nothing) <$> handleLiteralCell coord value
 
 -- | Handle cell clearing in App monad
 handleClearCell :: Coord -> App Aeson.Value
@@ -228,20 +228,19 @@ handleClearCell coord = do
   (grid, stats) <- readAppState
   pure $ mkCellResponse emptyCell grid stats
 
--- | Handle formula cell update in App monad
-handleFormulaCell :: Coord -> Text -> App Aeson.Value
-handleFormulaCell coord formula = do
+-- | Handle formula cell update in App monad, returning log message
+handleFormulaCellWithLog :: Coord -> Text -> App (Aeson.Value, Maybe Text)
+handleFormulaCellWithLog coord formula = do
   AppState {..} <- ask
   grid <- readGridM
   logFormulaEvaluation formula grid
   newCell <- liftIO $ evaluateAndBuildCell appEnv formula grid
-  -- Always log result (not just in debug mode)
-  liftIO $ TIO.putStrLn $ "  Result: " <> cellDisplay newCell
+  let logMsg = coordToRef coord <> " = " <> formula <> " -> " <> formatResultForLog (cellValue newCell)
   debugLog "==========================================="
   liftIO $ updateGridAndStats appGrid appStats (configStats appConfig) coord newCell
   recalculateDependents coord
   (updatedGrid, stats) <- readAppState
-  pure $ mkCellResponse newCell updatedGrid stats
+  pure (mkCellResponse newCell updatedGrid stats, Just logMsg)
 
 -- | Handle literal cell update in App monad
 handleLiteralCell :: Coord -> Text -> App Aeson.Value
@@ -341,6 +340,15 @@ mkCellResponse cell grid stats =
       "cells" .= gridToJson grid,
       "stats" .= stats
     ]
+
+-- | Format CellValue for logging with type visibility
+formatResultForLog :: CellValue -> Text
+formatResultForLog = \case
+  CellEmpty -> "[empty]"
+  CellNumber n -> T.pack (show n)
+  CellText t -> "\"" <> t <> "\""
+  CellBoolean b -> if b then "TRUE" else "FALSE"
+  CellError e -> "ERROR: " <> formatFormulaError e
 
 -- | Check if debug logging is enabled from config
 debugEnabled :: Config -> Bool
