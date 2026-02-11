@@ -192,14 +192,20 @@ evaluateFormula formulaText grid = do
       _ -> Nothing
 
 gridContext :: Grid -> Text
-gridContext grid = case mapMaybe formatValidCell (Map.toList grid) of
-  [] -> "No cells have values yet."
-  xs -> T.intercalate ", " xs
+gridContext grid
+  | null validCells = "No cells have values yet."
+  | otherwise = T.intercalate ", " validCells
   where
-    formatValidCell (coord, cell) = case cellValue cell of
-      CellNumber n -> Just $ coordToRef coord <> "=" <> T.pack (show n)
-      CellText t -> Just $ coordToRef coord <> "=\"" <> t <> "\""
-      CellBoolean b -> Just $ coordToRef coord <> "=" <> if b then "TRUE" else "FALSE"
+    validCells = foldMap (maybeToList . formatCell) (Map.toList grid)
+
+    formatCell (coord, cell) = do
+      valueText <- cellValueToContext (cellValue cell)
+      pure $ coordToRef coord <> "=" <> valueText
+
+    cellValueToContext = \case
+      CellNumber n -> Just $ T.pack (show n)
+      CellText t -> Just $ "\"" <> t <> "\""
+      CellBoolean b -> Just $ if b then "TRUE" else "FALSE"
       _ -> Nothing
 
 -- Exported version of gridContext for debugging
@@ -319,19 +325,24 @@ isLikelyColLetter :: Text -> Bool
 isLikelyColLetter t =
   T.length t <= 2 && T.all isAsciiUpper (T.toUpper t)
 
+-- | Smart constructor for Suggestion to reduce boilerplate
+mkSuggestion :: Text -> Text -> Text -> SuggestionType -> Text -> Suggestion
+mkSuggestion text display desc typ insert =
+  Suggestion
+    { suggestionText = text,
+      suggestionDisplay = display,
+      suggestionDescription = desc,
+      suggestionType = typ,
+      suggestionInsert = insert
+    }
+
 functionSuggestions :: Text -> [Suggestion]
 functionSuggestions prefix =
   map functionToSuggestion . take 8 . filter (T.isPrefixOf (T.toUpper prefix) . funcName) $ formulaFunctions
 
 functionToSuggestion :: FormulaFunction -> Suggestion
 functionToSuggestion FormulaFunction {..} =
-  Suggestion
-    { suggestionText = funcName,
-      suggestionDisplay = funcSignature,
-      suggestionDescription = funcDescription,
-      suggestionType = SuggestionFunction,
-      suggestionInsert = funcName <> "("
-    }
+  mkSuggestion funcName funcSignature funcDescription SuggestionFunction (funcName <> "(")
 
 cellSuggestions :: Text -> Grid -> Int -> Int -> [Suggestion]
 cellSuggestions prefix grid maxRows maxCols =
@@ -352,14 +363,7 @@ generateCellRefs maxRows maxCols =
   [coordToRef (row, col) | row <- [1 .. maxRows], col <- [1 .. maxCols]]
 
 cellToSuggestion :: Text -> Suggestion
-cellToSuggestion ref =
-  Suggestion
-    { suggestionText = ref,
-      suggestionDisplay = ref,
-      suggestionDescription = "Cell reference",
-      suggestionType = SuggestionCell,
-      suggestionInsert = ref
-    }
+cellToSuggestion ref = mkSuggestion ref ref "Cell reference" SuggestionCell ref
 
 -- Dependency tracking
 

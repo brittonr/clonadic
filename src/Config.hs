@@ -10,11 +10,14 @@ module Config
     GridConfig (..),
     ConfigError (..),
     loadConfig,
+    validateConfig,
     defaultConfig,
   )
 where
 
 import Control.Exception (IOException, try)
+import Control.Monad (when)
+import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -25,6 +28,7 @@ import Toml qualified
 data ConfigError
   = ConfigParseError !Text
   | ConfigFileError !IOException
+  | ConfigValidationError !Text
   deriving stock (Show, Eq)
 
 data Config = Config
@@ -142,11 +146,24 @@ configCodec =
     <*> Toml.table statsCodec "stats" .= configStats
     <*> Toml.table gridCodec "grid" .= configGrid
 
+-- | Validate config values at load time to catch errors early
+validateConfig :: Config -> Either ConfigError Config
+validateConfig cfg@Config {..} = do
+  when (serverPort configServer < 1 || serverPort configServer > 65535) $
+    Left $ ConfigValidationError "Port must be between 1 and 65535"
+  when (llmTemperature configLlm < 0 || llmTemperature configLlm > 2) $
+    Left $ ConfigValidationError "Temperature must be between 0 and 2"
+  when (llmProvider configLlm /= Ollama && isNothing (llmApiKey configLlm)) $
+    Left $ ConfigValidationError "API key required for OpenAI/Anthropic"
+  when (gridDefaultRows configGrid < 1 || gridDefaultCols configGrid < 1) $
+    Left $ ConfigValidationError "Grid dimensions must be positive"
+  pure cfg
+
 loadConfig :: FilePath -> IO (Either ConfigError Config)
 loadConfig path = do
   result <- try $ TIO.readFile path
-  case result of
-    Left err -> pure $ Left $ ConfigFileError err
-    Right content -> pure $ case Toml.decode configCodec content of
+  pure $ case result of
+    Left err -> Left $ ConfigFileError err
+    Right content -> case Toml.decode configCodec content of
       Left errs -> Left $ ConfigParseError $ T.pack $ show errs
-      Right cfg -> Right cfg
+      Right cfg -> validateConfig cfg

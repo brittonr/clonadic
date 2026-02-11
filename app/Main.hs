@@ -23,6 +23,27 @@ import Network.Wai.Middleware.Static (addBase, staticPolicy)
 import Spreadsheet
 import Web.Scotty
 
+-- | Structured API error type for consistent error responses
+data ApiError
+  = InvalidJsonBody
+  | MissingParam !TL.Text
+  | InvalidParam !TL.Text !String
+  deriving stock (Show)
+
+-- | Render API error as user-facing message
+apiErrorMessage :: ApiError -> Text
+apiErrorMessage = \case
+  InvalidJsonBody -> "Invalid JSON body"
+  MissingParam name -> "Missing parameter: " <> TL.toStrict name
+  InvalidParam name msg -> "Invalid parameter '" <> TL.toStrict name <> "': " <> T.pack msg
+
+-- | Raise an API error with consistent JSON response format
+raiseApiError :: ApiError -> ActionM a
+raiseApiError err = do
+  status status400
+  json $ object ["success" .= False, "error" .= apiErrorMessage err]
+  finish
+
 loadConfigWithFallback :: FilePath -> IO Config
 loadConfigWithFallback path = do
   result <- loadConfig path
@@ -32,6 +53,10 @@ loadConfigWithFallback path = do
       pure defaultConfig
     Left (ConfigParseError err) -> do
       TIO.putStrLn $ "Warning: Failed to parse config: " <> err
+      TIO.putStrLn "Using default configuration."
+      pure defaultConfig
+    Left (ConfigValidationError err) -> do
+      TIO.putStrLn $ "Warning: Config validation failed: " <> err
       TIO.putStrLn "Using default configuration."
       pure defaultConfig
     Right cfg -> do
@@ -50,18 +75,14 @@ readAppState AppState {..} = (,) <$> readTVarIO appGrid <*> readTVarIO appStats
 
 -- Create ClonadEnv from config
 mkClonadEnvFromConfig :: LlmConfig -> ClonadEnv
-mkClonadEnvFromConfig llmCfg = case llmProvider llmCfg of
-  Ollama ->
-    let baseUrl = fromMaybe "http://localhost:11434" (llmBaseUrl llmCfg)
-        modelId = fromString (T.unpack (llmModel llmCfg)) :: ModelId
-     in mkOllamaEnv baseUrl modelId
-  OpenAI ->
-    let apiKey = fromString (T.unpack (fromMaybe "" (llmApiKey llmCfg))) :: ApiKey
-        modelId = fromString (T.unpack (llmModel llmCfg)) :: ModelId
-     in mkOpenAIEnv apiKey modelId (llmBaseUrl llmCfg)
-  Anthropic ->
-    let apiKey = fromString (T.unpack (fromMaybe "" (llmApiKey llmCfg))) :: ApiKey
-     in mkEnv apiKey
+mkClonadEnvFromConfig LlmConfig {..} = case llmProvider of
+  Ollama -> mkOllamaEnv baseUrl modelId
+  OpenAI -> mkOpenAIEnv apiKey modelId llmBaseUrl
+  Anthropic -> mkEnv apiKey
+  where
+    baseUrl = fromMaybe "http://localhost:11434" llmBaseUrl
+    modelId = fromString (T.unpack llmModel) :: ModelId
+    apiKey = fromString (T.unpack (fromMaybe "" llmApiKey)) :: ApiKey
 
 main :: IO ()
 main = do
@@ -127,19 +148,10 @@ jsonParam :: (Aeson.FromJSON a) => TL.Text -> ActionM a
 jsonParam name = do
   b <- body
   case Aeson.decode b of
-    Nothing -> do
-      status status400
-      text "Invalid JSON body"
-      finish
+    Nothing -> raiseApiError InvalidJsonBody
     Just obj -> case lookupAndParse name obj of
-      Nothing -> do
-        status status400
-        text $ "Missing parameter: " <> name
-        finish
-      Just (Aeson.Error msg) -> do
-        status status400
-        text $ "Invalid parameter '" <> name <> "': " <> TL.pack msg
-        finish
+      Nothing -> raiseApiError (MissingParam name)
+      Just (Aeson.Error msg) -> raiseApiError (InvalidParam name msg)
       Just (Aeson.Success val) -> pure val
   where
     lookupAndParse :: (Aeson.FromJSON a) => TL.Text -> Aeson.Value -> Maybe (Aeson.Result a)
