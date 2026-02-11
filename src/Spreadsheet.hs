@@ -24,7 +24,7 @@ module Spreadsheet
 
     -- * Grid Operations
     emptyGrid,
-    getCell,
+    getCellOrEmpty,
     setCell,
     deleteCell,
     gridFilter,
@@ -78,7 +78,9 @@ import Data.Functor (($>))
 import Data.List qualified as List (unfoldr)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (mapMaybe, maybeToList)
+import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
+import Data.Sequence (Seq (..))
+import Data.Sequence qualified as Seq
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -219,8 +221,10 @@ singleOpStats = Stats 1
 emptyGrid :: Grid
 emptyGrid = Grid Map.empty
 
-getCell :: Coord -> Grid -> Cell
-getCell coord = Map.findWithDefault (Cell CellEmpty Nothing "") coord . unGrid
+-- | Get cell at coordinate, returning emptyCell if not present
+-- For explicit Maybe behavior, use gridLookup instead
+getCellOrEmpty :: Coord -> Grid -> Cell
+getCellOrEmpty coord = fromMaybe emptyCell . gridLookup coord
 
 setCell :: Coord -> Cell -> Grid -> Grid
 setCell coord cell = Grid . Map.insert coord cell . unGrid
@@ -279,17 +283,11 @@ rowP = do
 
 -- | Parse a cell coordinate (e.g., A1, AA99)
 coordP :: A.Parser Coord
-coordP = do
-  col <- columnP
-  row <- rowP
-  pure (Coord row col)
+coordP = flip Coord <$> columnP <*> rowP
 
 -- | Parse a range (e.g., A1:B3)
 rangeP :: A.Parser [Coord]
-rangeP = do
-  start <- coordP
-  _ <- A.char ':'
-  expandRangeCoords start <$> coordP
+rangeP = expandRangeCoords <$> coordP <* A.char ':' <*> coordP
 
 -- | Expand a range from start to end coordinates
 expandRangeCoords :: Coord -> Coord -> [Coord]
@@ -334,7 +332,7 @@ evaluateFormula formulaText grid = do
   pure $ parseResult result
   where
     getCellNumericValue :: Coord -> Grid -> Maybe Double
-    getCellNumericValue coord g = case cellValue (getCell coord g) of
+    getCellNumericValue coord g = case cellValue (getCellOrEmpty coord g) of
       CellNumber n -> Just n
       _ -> Nothing
 
@@ -521,9 +519,13 @@ mkSuggestion text display desc typ insert =
       suggestionInsert = insert
     }
 
+-- | Maximum number of suggestions to return for autocomplete
+maxSuggestions :: Int
+maxSuggestions = 8
+
 functionSuggestions :: Text -> [Suggestion]
 functionSuggestions prefix =
-  map functionToSuggestion . take 8 . filter (T.isPrefixOf (T.toUpper prefix) . funcName) $ formulaFunctions
+  map functionToSuggestion . take maxSuggestions . filter (T.isPrefixOf (T.toUpper prefix) . funcName) $ formulaFunctions
 
 functionToSuggestion :: FormulaFunction -> Suggestion
 functionToSuggestion FormulaFunction {..} =
@@ -537,7 +539,7 @@ cellSuggestions prefix grid maxRows maxCols =
       allCells = generateCellRefs maxRows maxCols
       prioritizedCells = nonEmptyCells <> filter (`Set.notMember` nonEmptySet) allCells
       matches = filter (T.isPrefixOf upper . T.toUpper) prioritizedCells
-   in map cellToSuggestion (take 8 matches)
+   in map cellToSuggestion (take maxSuggestions matches)
 
 getNonEmptyCellRefs :: Grid -> [Text]
 getNonEmptyCellRefs grid =
@@ -571,16 +573,19 @@ extractCellRefs = concatMap parseToken . tokenize . T.toUpper
 
 -- | Find all cells that depend on a given coordinate (directly or indirectly)
 -- Uses Set for visited tracking to prevent infinite loops on circular references
+-- Uses Data.Sequence for O(1) queue operations instead of O(n) list append
 findDependentCells :: Coord -> Grid -> [Coord]
-findDependentCells changedCoord grid = go Set.empty [changedCoord]
+findDependentCells changedCoord grid = go Set.empty (Seq.singleton changedCoord) []
   where
-    go _ [] = []
-    go visited (c : cs)
-      | Set.member c visited = go visited cs
+    go _ Seq.Empty acc = acc
+    go visited (c :<| cs) acc
+      | Set.member c visited = go visited cs acc
       | otherwise =
           let directDeps = findDirectDependents c grid
-              newDeps = filter (`Set.notMember` visited) directDeps
-           in directDeps ++ go (Set.insert c visited) (newDeps ++ cs)
+              newVisited = Set.insert c visited
+              unvisitedDeps = filter (`Set.notMember` newVisited) directDeps
+              newQueue = foldl' (Seq.|>) cs unvisitedDeps
+           in go newVisited newQueue (acc <> directDeps)
 
 -- | Find cells that directly reference the given coordinate
 findDirectDependents :: Coord -> Grid -> [Coord]

@@ -2,24 +2,38 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Config
-  ( Config (..),
+  ( -- * Configuration Types
+    Config (..),
     ServerConfig (..),
     LlmConfig (..),
     LlmProvider (..),
     StatsConfig (..),
     GridConfig (..),
+
+    -- * Validated Newtypes
+    Port (..),
+    mkPort,
+    Temperature (..),
+    mkTemperature,
+    PositiveInt (..),
+    mkPositiveInt,
+
+    -- * Errors
     ConfigError (..),
     ValidationReason (..),
+    formatValidationReason,
+
+    -- * Loading
     loadConfig,
     validateConfig,
     defaultConfig,
-    formatValidationReason,
   )
 where
 
+import Control.Category ((>>>))
 import Control.Exception (IOException, try)
-import Control.Monad (when)
-import Data.Maybe (isNothing)
+import Control.Monad (guard)
+import Data.Functor (($>))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -49,6 +63,30 @@ data ConfigError
   | ConfigValidationError !ValidationReason
   deriving stock (Show, Eq)
 
+-- | Valid TCP port (1-65535)
+newtype Port = Port {unPort :: Int}
+  deriving stock (Show, Eq, Generic)
+
+-- | Smart constructor for Port
+mkPort :: Int -> Maybe Port
+mkPort n = guard (n >= 1 && n <= 65535) $> Port n
+
+-- | LLM temperature (0.0-2.0)
+newtype Temperature = Temperature {unTemperature :: Double}
+  deriving stock (Show, Eq, Generic)
+
+-- | Smart constructor for Temperature
+mkTemperature :: Double -> Maybe Temperature
+mkTemperature t = guard (t >= 0 && t <= 2) $> Temperature t
+
+-- | Positive dimension for grid (>= 1)
+newtype PositiveInt = PositiveInt {unPositiveInt :: Int}
+  deriving stock (Show, Eq, Generic)
+
+-- | Smart constructor for PositiveInt
+mkPositiveInt :: Int -> Maybe PositiveInt
+mkPositiveInt n = guard (n >= 1) $> PositiveInt n
+
 data Config = Config
   { configServer :: ServerConfig,
     configLlm :: LlmConfig,
@@ -59,7 +97,7 @@ data Config = Config
 
 data ServerConfig = ServerConfig
   { serverHost :: Text,
-    serverPort :: Int,
+    serverPort :: !Port,
     serverDebug :: Bool
   }
   deriving stock (Show, Eq, Generic)
@@ -72,7 +110,7 @@ data LlmConfig = LlmConfig
     llmBaseUrl :: Maybe Text, -- Ollama host or custom OpenAI endpoint
     llmApiKey :: Maybe Text, -- API key for OpenAI/Anthropic
     llmModel :: Text,
-    llmTemperature :: Double
+    llmTemperature :: !Temperature
   }
   deriving stock (Show, Eq, Generic)
 
@@ -83,8 +121,8 @@ data StatsConfig = StatsConfig
   deriving stock (Show, Eq, Generic)
 
 data GridConfig = GridConfig
-  { gridDefaultRows :: Int,
-    gridDefaultCols :: Int
+  { gridDefaultRows :: !PositiveInt,
+    gridDefaultCols :: !PositiveInt
   }
   deriving stock (Show, Eq, Generic)
 
@@ -94,7 +132,7 @@ defaultConfig =
     { configServer =
         ServerConfig
           { serverHost = "localhost",
-            serverPort = 8080,
+            serverPort = Port 8080,
             serverDebug = False
           },
       configLlm =
@@ -103,7 +141,7 @@ defaultConfig =
             llmBaseUrl = Just "http://localhost:11434",
             llmApiKey = Nothing,
             llmModel = "qwen3:4b",
-            llmTemperature = 0.0
+            llmTemperature = Temperature 0.0
           },
       configStats =
         StatsConfig
@@ -112,16 +150,57 @@ defaultConfig =
           },
       configGrid =
         GridConfig
-          { gridDefaultRows = 20,
-            gridDefaultCols = 10
+          { gridDefaultRows = PositiveInt 20,
+            gridDefaultCols = PositiveInt 10
           }
     }
+
+-- | BiMap from Port to Int (the second type is what TOML stores)
+-- prism :: (b -> a) -> (a -> Either e b) -> BiMap e a b
+-- For BiMap Port Int: we need (Int -> Port) and (Port -> Either e Int)
+_Port :: Toml.TomlBiMap Port Int
+_Port =
+  Toml.BiMap
+    { Toml.forward = Right . unPort,
+      Toml.backward = \n ->
+        maybe (Left $ Toml.ArbitraryError $ "Port must be 1-65535, got: " <> T.pack (show n)) Right (mkPort n)
+    }
+
+-- | Codec for Port with validation using BiMap composition
+portCodec :: Toml.Key -> TomlCodec Port
+portCodec = Toml.match (_Port >>> Toml._Int)
+
+-- | BiMap from Temperature to Double
+_Temperature :: Toml.TomlBiMap Temperature Double
+_Temperature =
+  Toml.BiMap
+    { Toml.forward = Right . unTemperature,
+      Toml.backward = \t ->
+        maybe (Left $ Toml.ArbitraryError $ "Temperature must be 0-2, got: " <> T.pack (show t)) Right (mkTemperature t)
+    }
+
+-- | Codec for Temperature with validation
+temperatureCodec :: Toml.Key -> TomlCodec Temperature
+temperatureCodec = Toml.match (_Temperature >>> Toml._Double)
+
+-- | BiMap from PositiveInt to Int
+_PositiveInt :: Toml.TomlBiMap PositiveInt Int
+_PositiveInt =
+  Toml.BiMap
+    { Toml.forward = Right . unPositiveInt,
+      Toml.backward = \n ->
+        maybe (Left $ Toml.ArbitraryError $ "Must be positive, got: " <> T.pack (show n)) Right (mkPositiveInt n)
+    }
+
+-- | Codec for PositiveInt with validation
+positiveIntCodec :: Toml.Key -> TomlCodec PositiveInt
+positiveIntCodec = Toml.match (_PositiveInt >>> Toml._Int)
 
 serverCodec :: TomlCodec ServerConfig
 serverCodec =
   ServerConfig
     <$> Toml.text "host" .= serverHost
-    <*> Toml.int "port" .= serverPort
+    <*> portCodec "port" .= serverPort
     <*> Toml.bool "debug" .= serverDebug
 
 providerCodec :: Toml.Key -> TomlCodec LlmProvider
@@ -145,7 +224,7 @@ llmCodec =
     <*> Toml.dioptional (Toml.text "base_url") .= llmBaseUrl
     <*> Toml.dioptional (Toml.text "api_key") .= llmApiKey
     <*> Toml.text "model" .= llmModel
-    <*> Toml.double "temperature" .= llmTemperature
+    <*> temperatureCodec "temperature" .= llmTemperature
 
 statsCodec :: TomlCodec StatsConfig
 statsCodec =
@@ -156,8 +235,8 @@ statsCodec =
 gridCodec :: TomlCodec GridConfig
 gridCodec =
   GridConfig
-    <$> Toml.int "default_rows" .= gridDefaultRows
-    <*> Toml.int "default_cols" .= gridDefaultCols
+    <$> positiveIntCodec "default_rows" .= gridDefaultRows
+    <*> positiveIntCodec "default_cols" .= gridDefaultCols
 
 configCodec :: TomlCodec Config
 configCodec =
@@ -168,28 +247,23 @@ configCodec =
     <*> Toml.table gridCodec "grid" .= configGrid
 
 -- | Validate server configuration
+-- Port is already validated by the Port newtype
 validateServerConfig :: ServerConfig -> Either ConfigError ()
-validateServerConfig ServerConfig {..} =
-  when (serverPort < 1 || serverPort > 65535) $
-    Left $
-      ConfigValidationError (InvalidPort serverPort)
+validateServerConfig _ = pure ()
 
 -- | Validate LLM configuration
+-- Temperature is already validated by the Temperature newtype
+-- Only need to check API key requirement for non-Ollama providers
 validateLlmConfig :: LlmConfig -> Either ConfigError ()
-validateLlmConfig LlmConfig {..} = do
-  when (llmTemperature < 0 || llmTemperature > 2) $
-    Left $
-      ConfigValidationError (InvalidTemperature llmTemperature)
-  when (llmProvider /= Ollama && isNothing llmApiKey) $
-    Left $
-      ConfigValidationError (MissingApiKey llmProvider)
+validateLlmConfig LlmConfig {..} = case (llmProvider, llmApiKey) of
+  (Ollama, _) -> pure ()
+  (_, Just _) -> pure ()
+  (provider, Nothing) -> Left $ ConfigValidationError (MissingApiKey provider)
 
 -- | Validate grid configuration
+-- Grid dimensions are already validated by the PositiveInt newtype
 validateGridConfig :: GridConfig -> Either ConfigError ()
-validateGridConfig GridConfig {..} =
-  when (gridDefaultRows < 1 || gridDefaultCols < 1) $
-    Left $
-      ConfigValidationError (InvalidGridDimension gridDefaultRows gridDefaultCols)
+validateGridConfig _ = pure ()
 
 -- | Validate config values at load time to catch errors early
 validateConfig :: Config -> Either ConfigError Config

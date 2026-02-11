@@ -1,7 +1,7 @@
 module Main where
 
 import Clonad (ApiKey, ClonadEnv, ModelId, mkEnv, mkOllamaEnv, mkOpenAIEnv, runClonad, withTemperature)
-import Config (Config (..), ConfigError (..), GridConfig (..), LlmConfig (..), LlmProvider (..), ServerConfig (..), StatsConfig (..), defaultConfig, formatValidationReason, loadConfig, serverDebug)
+import Config (Config (..), ConfigError (..), GridConfig (..), LlmConfig (..), LlmProvider (..), Port (..), PositiveInt (..), ServerConfig (..), StatsConfig (..), defaultConfig, formatValidationReason, loadConfig, serverDebug)
 import Control.Concurrent.STM
 import Control.Monad (foldM, forM_, when)
 import Control.Monad.Reader (MonadIO, MonadReader, ReaderT, ask, asks, runReaderT)
@@ -23,6 +23,10 @@ import Network.Wai.Middleware.Static (addBase, staticPolicy)
 import Spreadsheet
 import Web.Scotty
 
+-- | Convert a Show instance to Text
+showT :: (Show a) => a -> Text
+showT = T.pack . show
+
 -- | Structured API error type for consistent error responses
 data ApiError
   = InvalidJsonBody
@@ -37,7 +41,7 @@ apiErrorMessage = \case
   InvalidJsonBody -> "Invalid JSON body"
   MissingParam name -> "Missing parameter: " <> name
   InvalidParam name msg -> "Invalid parameter '" <> name <> "': " <> T.pack msg
-  InvalidCoordinate r c -> "Invalid coordinate: row=" <> T.pack (show r) <> ", col=" <> T.pack (show c)
+  InvalidCoordinate r c -> "Invalid coordinate: row=" <> showT r <> ", col=" <> showT c
 
 -- | Raise an API error with consistent JSON response format
 raiseApiError :: ApiError -> ActionM a
@@ -114,10 +118,10 @@ main = do
   TIO.putStrLn "Clonadic - Every formula evaluation is a prayer."
 
   cfg <- loadConfigWithFallback "config.toml"
-  let port = serverPort (configServer cfg)
+  let port = unPort $ serverPort (configServer cfg)
       llmCfg = configLlm cfg
-  TIO.putStrLn $ "Starting server on http://" <> serverHost (configServer cfg) <> ":" <> T.pack (show port)
-  TIO.putStrLn $ "LLM Provider: " <> T.pack (show (llmProvider llmCfg))
+  TIO.putStrLn $ "Starting server on http://" <> serverHost (configServer cfg) <> ":" <> showT port
+  TIO.putStrLn $ "LLM Provider: " <> showT (llmProvider llmCfg)
   TIO.putStrLn $ "LLM Model: " <> llmModel llmCfg
 
   let env = mkClonadEnvFromConfig llmCfg
@@ -158,7 +162,12 @@ main = do
       input <- fromMaybe "" <$> queryParamMaybe "input"
       grid <- liftIO $ readTVarIO (appGrid state)
       let gridCfg = configGrid (appConfig state)
-          suggestions = getAutocompleteSuggestions input grid (gridDefaultRows gridCfg) (gridDefaultCols gridCfg)
+          suggestions =
+            getAutocompleteSuggestions
+              input
+              grid
+              (unPositiveInt $ gridDefaultRows gridCfg)
+              (unPositiveInt $ gridDefaultCols gridCfg)
       json $ object ["suggestions" .= suggestions]
 
 jsonParam :: (Aeson.FromJSON a) => Text -> ActionM a
@@ -227,7 +236,7 @@ handleFormulaCell coord formula = do
   logFormulaEvaluation formula grid
   newCell <- liftIO $ evaluateAndBuildCell appEnv formula grid
   debugLog "--- LLM RESPONSE ---"
-  debugLog $ "Result: " <> T.pack (show (cellValue newCell))
+  debugLog $ "Result: " <> showT (cellValue newCell)
   debugLog "==========================================="
   liftIO $ updateGridAndStats appGrid appStats (configStats appConfig) coord newCell
   recalculateDependents coord
@@ -261,11 +270,11 @@ logFormulaEvaluation formula grid = do
   debugLog "========== FORMULA EVALUATION =========="
   debugLog $ "Formula: " <> formula
   let refs = extractCellRefs formula
-  debugLog $ "Cell refs found: " <> T.pack (show refs)
+  debugLog $ "Cell refs found: " <> showT refs
   whenDebug $
     forM_ refs $ \refCoord -> do
-      let refCell = getCell refCoord grid
-      debugLog $ "  " <> T.pack (show refCoord) <> " -> " <> cellDisplay refCell
+      let refCell = getCellOrEmpty refCoord grid
+      debugLog $ "  " <> showT refCoord <> " -> " <> cellDisplay refCell
   let ctx = gridContextText grid
   debugLog ""
   debugLog "--- PROMPT TO LLM ---"
@@ -281,11 +290,11 @@ recalculateDependents :: Coord -> App ()
 recalculateDependents changedCoord = do
   grid <- readGridM
   let dependents = findDependentCells changedCoord grid
-  debugLog $ "Changed cell: " <> T.pack (show changedCoord)
-  debugLog $ "Found dependents: " <> T.pack (show dependents)
+  debugLog $ "Changed cell: " <> showT changedCoord
+  debugLog $ "Found dependents: " <> showT dependents
   whenDebug $ do
     let formulas = [(c, f) | (c, cell) <- gridToList grid, Just f <- [cellFormula cell]]
-    debugLog $ "All formulas in grid: " <> T.pack (show formulas)
+    debugLog $ "All formulas in grid: " <> showT formulas
   traverse_ recalculateCell dependents
 
 -- | Recalculate a single cell
@@ -295,20 +304,20 @@ recalculateCell coord = do
   grid <- readGridM
   case gridLookup coord grid of
     Nothing ->
-      debugLog $ "  Cell " <> T.pack (show coord) <> " not found in grid"
+      debugLog $ "  Cell " <> showT coord <> " not found in grid"
     Just cell -> case cellFormula cell of
       Nothing ->
-        debugLog $ "  Cell " <> T.pack (show coord) <> " has no formula"
+        debugLog $ "  Cell " <> showT coord <> " has no formula"
       Just formula -> do
         debugLog ""
-        debugLog $ "========== RECALCULATING " <> T.pack (show coord) <> " =========="
+        debugLog $ "========== RECALCULATING " <> showT coord <> " =========="
         debugLog $ "Formula: " <> formula
         let refs = extractCellRefs formula
-        debugLog $ "Cell refs: " <> T.pack (show refs)
+        debugLog $ "Cell refs: " <> showT refs
         whenDebug $
           forM_ refs $ \refCoord -> do
-            let refCell = getCell refCoord grid
-            debugLog $ "  " <> T.pack (show refCoord) <> " -> " <> cellDisplay refCell
+            let refCell = getCellOrEmpty refCoord grid
+            debugLog $ "  " <> showT refCoord <> " -> " <> cellDisplay refCell
         debugLog ""
         debugLog "--- PROMPT TO LLM ---"
         debugLog $ "Input: (\"" <> formula <> "\", \"" <> gridContextText grid <> "\")"
