@@ -1,7 +1,7 @@
 module Main where
 
 import Clonad (ApiKey, ClonadEnv, ModelId, mkEnv, mkOllamaEnv, mkOpenAIEnv, runClonad, withTemperature)
-import Config (Config (..), ConfigError (..), GridConfig (..), LlmConfig (..), LlmProvider (..), ServerConfig (..), StatsConfig (..), defaultConfig, loadConfig, serverDebug)
+import Config (Config (..), ConfigError (..), GridConfig (..), LlmConfig (..), LlmProvider (..), ServerConfig (..), StatsConfig (..), defaultConfig, formatValidationReason, loadConfig, serverDebug)
 import Control.Concurrent.STM
 import Control.Monad (foldM, forM_, when)
 import Control.Monad.Reader (MonadIO, MonadReader, ReaderT, ask, asks, runReaderT)
@@ -10,7 +10,6 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Foldable (traverse_)
-import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.String (fromString)
 import Data.Text (Text)
@@ -58,8 +57,8 @@ loadConfigWithFallback path = do
       TIO.putStrLn $ "Warning: Failed to parse config: " <> err
       TIO.putStrLn "Using default configuration."
       pure defaultConfig
-    Left (ConfigValidationError err) -> do
-      TIO.putStrLn $ "Warning: Config validation failed: " <> err
+    Left (ConfigValidationError reason) -> do
+      TIO.putStrLn $ "Warning: Config validation failed: " <> formatValidationReason reason
       TIO.putStrLn "Using default configuration."
       pure defaultConfig
     Right cfg -> do
@@ -82,13 +81,22 @@ runApp :: AppState -> App a -> IO a
 runApp state (App m) = runReaderT m state
 
 -- | Read grid and stats atomically in App monad
-readAppStateM :: App (Grid, Stats)
-readAppStateM = do
+readAppState :: App (Grid, Stats)
+readAppState = do
   AppState {..} <- ask
   liftIO $ atomically $ (,) <$> readTVar appGrid <*> readTVar appStats
 
-readAppState :: AppState -> IO (Grid, Stats)
-readAppState AppState {..} = atomically $ (,) <$> readTVar appGrid <*> readTVar appStats
+-- | Read grid in App monad
+readGridM :: App Grid
+readGridM = asks appGrid >>= liftIO . readTVarIO
+
+-- | Read stats in App monad
+readStatsM :: App Stats
+readStatsM = asks appStats >>= liftIO . readTVarIO
+
+-- | Modify grid atomically in App monad
+modifyGridM :: (Grid -> Grid) -> App ()
+modifyGridM f = asks appGrid >>= \v -> liftIO $ atomically $ modifyTVar' v f
 
 -- | Create ClonadEnv from config with validation
 mkClonadEnvFromConfig :: LlmConfig -> ClonadEnv
@@ -125,7 +133,7 @@ main = do
     get "/" $ file "static/index.html"
 
     get "/api/grid" $ do
-      (grid, stats) <- liftIO $ readAppState state
+      (grid, stats) <- liftIO $ runApp state readAppState
       json $ object ["cells" .= gridToJson grid, "stats" .= stats]
 
     post "/api/cell" $ do
@@ -173,7 +181,7 @@ gridToJson grid =
   Aeson.Object $
     KM.fromList
       [ (Key.fromString $ show (unRow row) <> "," <> show (unCol col), cellToJson cell)
-      | (Coord row col, cell) <- Map.toList grid
+      | (Coord row col, cell) <- gridToList grid
       ]
 
 cellToJson :: Cell -> Aeson.Value
@@ -197,55 +205,45 @@ classifyCellInput t
 
 updateCell :: AppState -> Coord -> Text -> IO Aeson.Value
 updateCell state coord inputValue =
-  case classifyCellInput (T.strip inputValue) of
-    ClearCell -> handleClearCell state coord
-    FormulaInput formula -> handleFormulaCell state coord formula
-    LiteralInput value -> handleLiteralCell state coord value
-
-handleClearCell :: AppState -> Coord -> IO Aeson.Value
-handleClearCell state coord = runApp state $ handleClearCellM coord
+  runApp state $ case classifyCellInput (T.strip inputValue) of
+    ClearCell -> handleClearCell coord
+    FormulaInput formula -> handleFormulaCell coord formula
+    LiteralInput value -> handleLiteralCell coord value
 
 -- | Handle cell clearing in App monad
-handleClearCellM :: Coord -> App Aeson.Value
-handleClearCellM coord = do
+handleClearCell :: Coord -> App Aeson.Value
+handleClearCell coord = do
   AppState {..} <- ask
   liftIO $ deleteCellAtomic appGrid coord
-  recalculateDependentsM coord
-  (grid, stats) <- readAppStateM
+  recalculateDependents coord
+  (grid, stats) <- readAppState
   pure $ mkCellResponse emptyCell grid stats
 
-handleFormulaCell :: AppState -> Coord -> Text -> IO Aeson.Value
-handleFormulaCell state coord formula = runApp state $ handleFormulaCellM coord formula
-
 -- | Handle formula cell update in App monad
-handleFormulaCellM :: Coord -> Text -> App Aeson.Value
-handleFormulaCellM coord formula = do
+handleFormulaCell :: Coord -> Text -> App Aeson.Value
+handleFormulaCell coord formula = do
   AppState {..} <- ask
-  grid <- liftIO $ readTVarIO appGrid
-  logFormulaEvaluationM formula grid
+  grid <- readGridM
+  logFormulaEvaluation formula grid
   newCell <- liftIO $ evaluateAndBuildCell appEnv formula grid
   debugLog "--- LLM RESPONSE ---"
   debugLog $ "Result: " <> T.pack (show (cellValue newCell))
   debugLog "==========================================="
   liftIO $ updateGridAndStats appGrid appStats (configStats appConfig) coord newCell
-  recalculateDependentsM coord
-  (updatedGrid, stats) <- readAppStateM
+  recalculateDependents coord
+  (updatedGrid, stats) <- readAppState
   pure $ mkCellResponse newCell updatedGrid stats
 
-handleLiteralCell :: AppState -> Coord -> Text -> IO Aeson.Value
-handleLiteralCell state coord value = runApp state $ handleLiteralCellM coord value
-
 -- | Handle literal cell update in App monad
-handleLiteralCellM :: Coord -> Text -> App Aeson.Value
-handleLiteralCellM coord value = do
-  AppState {..} <- ask
+handleLiteralCell :: Coord -> Text -> App Aeson.Value
+handleLiteralCell coord value = do
   let cellVal = case TR.double value of
         Right (n, rest) | T.null rest -> CellNumber n
         _ -> CellText value
       newCell = mkLiteralCell cellVal (cellValueToDisplay cellVal)
-  liftIO $ atomically $ modifyTVar' appGrid (Map.insert coord newCell)
-  recalculateDependentsM coord
-  (updatedGrid, stats) <- readAppStateM
+  modifyGridM (setCell coord newCell)
+  recalculateDependents coord
+  (updatedGrid, stats) <- readAppState
   pure $ mkCellResponse newCell updatedGrid stats
 
 -- | Unified formula evaluation and cell construction
@@ -256,16 +254,15 @@ evaluateAndBuildCell env formula grid = do
   let displayText = cellValueToDisplay result
   pure $ mkFormulaCell formula result displayText
 
--- | Log formula evaluation details (App monad version)
-logFormulaEvaluationM :: Text -> Grid -> App ()
-logFormulaEvaluationM formula grid = do
+-- | Log formula evaluation details
+logFormulaEvaluation :: Text -> Grid -> App ()
+logFormulaEvaluation formula grid = do
   debugLog ""
   debugLog "========== FORMULA EVALUATION =========="
   debugLog $ "Formula: " <> formula
   let refs = extractCellRefs formula
   debugLog $ "Cell refs found: " <> T.pack (show refs)
-  debug <- isDebugEnabled
-  when debug $
+  whenDebug $
     forM_ refs $ \refCoord -> do
       let refCell = getCell refCoord grid
       debugLog $ "  " <> T.pack (show refCoord) <> " -> " <> cellDisplay refCell
@@ -279,48 +276,24 @@ logFormulaEvaluationM formula grid = do
   debugLog $ "Input tuple: (\"" <> formula <> "\", \"" <> ctx <> "\")"
   debugLog "--- END PROMPT ---"
 
--- | Log formula evaluation details (IO version for backward compatibility)
-logFormulaEvaluation :: Config -> Text -> Grid -> IO ()
-logFormulaEvaluation cfg formula grid = do
-  debugLogT cfg ""
-  debugLogT cfg "========== FORMULA EVALUATION =========="
-  debugLogT cfg $ "Formula: " <> formula
-  let refs = extractCellRefs formula
-  debugLogT cfg $ "Cell refs found: " <> T.pack (show refs)
-  when (debugEnabled cfg) $
-    forM_ refs $ \refCoord -> do
-      let refCell = getCell refCoord grid
-      debugLogT cfg $ "  " <> T.pack (show refCoord) <> " -> " <> cellDisplay refCell
-  let ctx = gridContextText grid
-  debugLogT cfg ""
-  debugLogT cfg "--- PROMPT TO LLM ---"
-  debugLogT cfg "System: You are a spreadsheet formula engine. Evaluate the given formula."
-  debugLogT cfg "        Cell values are provided as context. Return ONLY the numeric result."
-  debugLogT cfg "        If the formula is invalid or references empty cells, return 'ERROR: <reason>'."
-  debugLogT cfg ""
-  debugLogT cfg $ "Input tuple: (\"" <> formula <> "\", \"" <> ctx <> "\")"
-  debugLogT cfg "--- END PROMPT ---"
-
--- | Recalculate all cells that depend on the changed cell (App monad version)
-recalculateDependentsM :: Coord -> App ()
-recalculateDependentsM changedCoord = do
-  AppState {..} <- ask
-  grid <- liftIO $ readTVarIO appGrid
+-- | Recalculate all cells that depend on the changed cell
+recalculateDependents :: Coord -> App ()
+recalculateDependents changedCoord = do
+  grid <- readGridM
   let dependents = findDependentCells changedCoord grid
   debugLog $ "Changed cell: " <> T.pack (show changedCoord)
   debugLog $ "Found dependents: " <> T.pack (show dependents)
-  debug <- isDebugEnabled
-  when debug $ do
-    let formulas = [(c, f) | (c, cell) <- Map.toList grid, Just f <- [cellFormula cell]]
+  whenDebug $ do
+    let formulas = [(c, f) | (c, cell) <- gridToList grid, Just f <- [cellFormula cell]]
     debugLog $ "All formulas in grid: " <> T.pack (show formulas)
-  traverse_ recalculateCellM dependents
+  traverse_ recalculateCell dependents
 
--- | Recalculate a single cell (App monad version)
-recalculateCellM :: Coord -> App ()
-recalculateCellM coord = do
+-- | Recalculate a single cell
+recalculateCell :: Coord -> App ()
+recalculateCell coord = do
   AppState {..} <- ask
-  grid <- liftIO $ readTVarIO appGrid
-  case Map.lookup coord grid of
+  grid <- readGridM
+  case gridLookup coord grid of
     Nothing ->
       debugLog $ "  Cell " <> T.pack (show coord) <> " not found in grid"
     Just cell -> case cellFormula cell of
@@ -332,8 +305,7 @@ recalculateCellM coord = do
         debugLog $ "Formula: " <> formula
         let refs = extractCellRefs formula
         debugLog $ "Cell refs: " <> T.pack (show refs)
-        debug <- isDebugEnabled
-        when debug $
+        whenDebug $
           forM_ refs $ \refCoord -> do
             let refCell = getCell refCoord grid
             debugLog $ "  " <> T.pack (show refCoord) <> " -> " <> cellDisplay refCell
@@ -347,12 +319,6 @@ recalculateCellM coord = do
         debugLog $ "Result: " <> cellDisplay updatedCell
         debugLog "==========================================="
         liftIO $ updateGridAndStats appGrid appStats (configStats appConfig) coord updatedCell
-
--- | Recalculate all cells that depend on the changed cell (IO version for backward compatibility)
-recalculateDependents :: ClonadEnv -> TVar Grid -> TVar Stats -> Config -> Coord -> IO ()
-recalculateDependents env gridVar statsVar cfg changedCoord = do
-  let state = AppState gridVar statsVar env cfg
-  runApp state $ recalculateDependentsM changedCoord
 
 -- | Create stats for a single operation from config
 statsFromConfig :: StatsConfig -> Stats
@@ -375,31 +341,29 @@ debugEnabled = serverDebug . configServer
 isDebugEnabled :: App Bool
 isDebugEnabled = asks (debugEnabled . appConfig)
 
--- | Log a debug message if debug mode is enabled (App monad version)
+-- | Log a debug message if debug mode is enabled
 debugLog :: Text -> App ()
-debugLog msg = do
-  debug <- isDebugEnabled
-  when debug $ liftIO $ TIO.putStrLn msg
+debugLog msg = whenDebug $ liftIO $ TIO.putStrLn msg
 
--- | Log a debug message if debug mode is enabled (IO version for transitional use)
-debugLogT :: Config -> Text -> IO ()
-debugLogT cfg msg = when (debugEnabled cfg) $ TIO.putStrLn msg
+-- | Execute an action only if debug mode is enabled
+whenDebug :: App () -> App ()
+whenDebug action = isDebugEnabled >>= \d -> when d action
 
 -- | STM helper for atomic grid+stats update
 updateGridAndStats :: TVar Grid -> TVar Stats -> StatsConfig -> Coord -> Cell -> IO ()
 updateGridAndStats gridVar statsVar statsCfg coord cell =
   atomically $ do
-    modifyTVar' gridVar (Map.insert coord cell)
+    modifyTVar' gridVar (setCell coord cell)
     modifyTVar' statsVar (<> statsFromConfig statsCfg)
 
 -- | STM helper for atomic cell deletion
 deleteCellAtomic :: TVar Grid -> Coord -> IO ()
-deleteCellAtomic gridVar coord = atomically $ modifyTVar' gridVar (Map.delete coord)
+deleteCellAtomic gridVar coord = atomically $ modifyTVar' gridVar (deleteCell coord)
 
 recalculateAll :: AppState -> IO Aeson.Value
 recalculateAll AppState {..} = do
   grid <- readTVarIO appGrid
-  let formulaCells = Map.toList $ Map.filter (isJust . cellFormula) grid
+  let formulaCells = gridToList $ gridFilter (isJust . cellFormula) grid
 
   newGrid <- foldM (recalcCell appEnv appStats appConfig) grid formulaCells
 
@@ -420,4 +384,4 @@ recalcCell env statsVar cfg grid (coord, cell) = case cellFormula cell of
   Just formula -> do
     newCell <- evaluateAndBuildCell env formula grid
     atomically $ modifyTVar' statsVar (<> statsFromConfig (configStats cfg))
-    pure $ Map.insert coord newCell grid
+    pure $ setCell coord newCell grid

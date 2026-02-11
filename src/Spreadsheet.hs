@@ -10,8 +10,12 @@ module Spreadsheet
     -- * Cell Types
     Cell (..),
     CellValue (..),
-    Grid,
+    FormulaError (..),
+    Grid (..),
     Stats (..),
+
+    -- * Error Formatting
+    formatFormulaError,
 
     -- * Cell Constructors
     emptyCell,
@@ -22,6 +26,10 @@ module Spreadsheet
     emptyGrid,
     getCell,
     setCell,
+    deleteCell,
+    gridFilter,
+    gridLookup,
+    gridKeys,
     gridToList,
     gridFromList,
 
@@ -130,12 +138,33 @@ instance FromJSONKey Coord where
         Right (n, "") -> pure n
         _ -> fail $ "Invalid integer: " <> T.unpack txt
 
+-- | Structured formula error types for better error categorization
+data FormulaError
+  = InvalidReference !Text
+  | CircularDependency ![Coord]
+  | DivisionByZero
+  | TypeError !Text !Text -- expected, actual
+  | SyntaxError !Text
+  | EvaluationError !Text
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (ToJSON, FromJSON)
+
+-- | Format a FormulaError for display
+formatFormulaError :: FormulaError -> Text
+formatFormulaError = \case
+  InvalidReference ref -> "Invalid reference: " <> ref
+  CircularDependency coords -> "Circular dependency: " <> T.intercalate " -> " (map coordToRef coords)
+  DivisionByZero -> "Division by zero"
+  TypeError expected actual -> "Type error: expected " <> expected <> ", got " <> actual
+  SyntaxError msg -> "Syntax error: " <> msg
+  EvaluationError msg -> msg
+
 data CellValue
   = CellEmpty
   | CellNumber !Double
   | CellText !Text
   | CellBoolean !Bool
-  | CellError !Text
+  | CellError !FormulaError
   deriving stock (Show, Eq, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
@@ -159,7 +188,12 @@ mkFormulaCell formula value = Cell value (Just formula)
 mkLiteralCell :: CellValue -> Text -> Cell
 mkLiteralCell value = Cell value Nothing
 
-type Grid = Map Coord Cell
+-- | Grid is a newtype wrapper around Map to provide encapsulation
+-- and enable type-safe operations with derived instances
+newtype Grid = Grid {unGrid :: Map Coord Cell}
+  deriving stock (Show, Eq, Generic)
+  deriving newtype (Semigroup, Monoid)
+  deriving anyclass (ToJSON, FromJSON)
 
 data Stats = Stats
   { statsOperations :: !Int,
@@ -183,19 +217,35 @@ singleOpStats :: Int -> Double -> Stats
 singleOpStats = Stats 1
 
 emptyGrid :: Grid
-emptyGrid = Map.empty
+emptyGrid = Grid Map.empty
 
 getCell :: Coord -> Grid -> Cell
-getCell = Map.findWithDefault (Cell CellEmpty Nothing "")
+getCell coord = Map.findWithDefault (Cell CellEmpty Nothing "") coord . unGrid
 
 setCell :: Coord -> Cell -> Grid -> Grid
-setCell = Map.insert
+setCell coord cell = Grid . Map.insert coord cell . unGrid
+
+-- | Delete a cell from the grid
+deleteCell :: Coord -> Grid -> Grid
+deleteCell coord = Grid . Map.delete coord . unGrid
+
+-- | Filter cells in the grid by predicate
+gridFilter :: (Cell -> Bool) -> Grid -> Grid
+gridFilter p = Grid . Map.filter p . unGrid
+
+-- | Lookup a cell in the grid (returns Nothing if not present)
+gridLookup :: Coord -> Grid -> Maybe Cell
+gridLookup coord = Map.lookup coord . unGrid
+
+-- | Get all coordinates in the grid
+gridKeys :: Grid -> [Coord]
+gridKeys = Map.keys . unGrid
 
 gridToList :: Grid -> [(Coord, Cell)]
-gridToList = Map.toList
+gridToList = Map.toList . unGrid
 
 gridFromList :: [(Coord, Cell)] -> Grid
-gridFromList = Map.fromList
+gridFromList = Grid . Map.fromList
 
 -- | Convert Coord to spreadsheet reference (e.g., Coord 1 1 -> "A1")
 coordToRef :: Coord -> Text
@@ -293,7 +343,7 @@ gridContext grid
   | null validCells = "No cells have values yet."
   | otherwise = T.intercalate ", " validCells
   where
-    validCells = foldMap (maybeToList . formatCell) (Map.toList grid)
+    validCells = foldMap (maybeToList . formatCell) (gridToList grid)
 
     formatCell (coord, cell) = do
       valueText <- cellValueToContext (cellValue cell)
@@ -313,7 +363,7 @@ gridContextText = gridContext
 parseResult :: Text -> CellValue
 parseResult t
   | T.null stripped = CellEmpty
-  | Just errMsg <- parseError stripped = CellError errMsg
+  | Just errMsg <- parseError stripped = CellError (classifyError errMsg)
   | upper == "TRUE" = CellBoolean True
   | upper == "FALSE" = CellBoolean False
   | Right (n, rest) <- TR.double stripped, T.null rest = CellNumber n
@@ -322,6 +372,19 @@ parseResult t
     stripped = T.strip t
     upper = T.toUpper stripped
     parseError s = T.strip <$> (T.stripPrefix "ERROR:" s <|> T.stripPrefix "ERROR " s)
+
+    -- Classify error message into structured FormulaError type
+    classifyError :: Text -> FormulaError
+    classifyError msg
+      | T.isInfixOf "division by zero" lowerMsg = DivisionByZero
+      | T.isInfixOf "divide by zero" lowerMsg = DivisionByZero
+      | T.isInfixOf "circular" lowerMsg = CircularDependency []
+      | T.isInfixOf "invalid reference" lowerMsg = InvalidReference msg
+      | T.isInfixOf "type" lowerMsg = TypeError "number" "text"
+      | T.isInfixOf "syntax" lowerMsg = SyntaxError msg
+      | otherwise = EvaluationError msg
+      where
+        lowerMsg = T.toLower msg
 
 -- Autocomplete functionality
 
@@ -478,7 +541,7 @@ cellSuggestions prefix grid maxRows maxCols =
 
 getNonEmptyCellRefs :: Grid -> [Text]
 getNonEmptyCellRefs grid =
-  [coordToRef coord | (coord, cell) <- Map.toList grid, cellValue cell /= CellEmpty]
+  [coordToRef coord | (coord, cell) <- gridToList grid, cellValue cell /= CellEmpty]
 
 generateCellRefs :: Int -> Int -> [Text]
 generateCellRefs maxRows maxCols =
@@ -522,7 +585,7 @@ findDependentCells changedCoord grid = go Set.empty [changedCoord]
 -- | Find cells that directly reference the given coordinate
 findDirectDependents :: Coord -> Grid -> [Coord]
 findDirectDependents targetCoord grid =
-  Map.keys $ Map.filterWithKey isDependent grid
+  Map.keys $ Map.filterWithKey isDependent (unGrid grid)
   where
     isDependent coord cell =
       coord /= targetCoord
@@ -541,4 +604,4 @@ cellValueToDisplay = \case
   CellNumber n -> T.pack $ showNumber n
   CellText t -> t
   CellBoolean b -> if b then "TRUE" else "FALSE"
-  CellError e -> "ERROR: " <> e
+  CellError e -> "ERROR: " <> formatFormulaError e

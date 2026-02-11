@@ -9,9 +9,11 @@ module Config
     StatsConfig (..),
     GridConfig (..),
     ConfigError (..),
+    ValidationReason (..),
     loadConfig,
     validateConfig,
     defaultConfig,
+    formatValidationReason,
   )
 where
 
@@ -25,10 +27,26 @@ import GHC.Generics (Generic)
 import Toml (TomlCodec, (.=))
 import Toml qualified
 
+-- | Structured validation failure reasons
+data ValidationReason
+  = InvalidPort !Int
+  | InvalidTemperature !Double
+  | MissingApiKey !LlmProvider
+  | InvalidGridDimension !Int !Int -- rows, cols
+  deriving stock (Show, Eq, Generic)
+
+-- | Format a ValidationReason for display
+formatValidationReason :: ValidationReason -> Text
+formatValidationReason = \case
+  InvalidPort p -> "Port must be between 1 and 65535, got: " <> T.pack (show p)
+  InvalidTemperature t -> "Temperature must be between 0 and 2, got: " <> T.pack (show t)
+  MissingApiKey provider -> "API key required for " <> T.pack (show provider)
+  InvalidGridDimension r c -> "Grid dimensions must be positive, got: rows=" <> T.pack (show r) <> ", cols=" <> T.pack (show c)
+
 data ConfigError
   = ConfigParseError !Text
   | ConfigFileError !IOException
-  | ConfigValidationError !Text
+  | ConfigValidationError !ValidationReason
   deriving stock (Show, Eq)
 
 data Config = Config
@@ -154,24 +172,24 @@ validateServerConfig :: ServerConfig -> Either ConfigError ()
 validateServerConfig ServerConfig {..} =
   when (serverPort < 1 || serverPort > 65535) $
     Left $
-      ConfigValidationError "Port must be between 1 and 65535"
+      ConfigValidationError (InvalidPort serverPort)
 
 -- | Validate LLM configuration
 validateLlmConfig :: LlmConfig -> Either ConfigError ()
 validateLlmConfig LlmConfig {..} = do
   when (llmTemperature < 0 || llmTemperature > 2) $
     Left $
-      ConfigValidationError "Temperature must be between 0 and 2"
+      ConfigValidationError (InvalidTemperature llmTemperature)
   when (llmProvider /= Ollama && isNothing llmApiKey) $
     Left $
-      ConfigValidationError "API key required for OpenAI/Anthropic"
+      ConfigValidationError (MissingApiKey llmProvider)
 
 -- | Validate grid configuration
 validateGridConfig :: GridConfig -> Either ConfigError ()
 validateGridConfig GridConfig {..} =
   when (gridDefaultRows < 1 || gridDefaultCols < 1) $
     Left $
-      ConfigValidationError "Grid dimensions must be positive"
+      ConfigValidationError (InvalidGridDimension gridDefaultRows gridDefaultCols)
 
 -- | Validate config values at load time to catch errors early
 validateConfig :: Config -> Either ConfigError Config
