@@ -341,9 +341,46 @@ evaluateFormula formulaText grid = do
         then evaluateNaturalLanguage formula grid
         else evaluateTraditionalFormula formulaText grid
 
--- | Evaluate a natural language request
+-- | Check if a natural language query references spreadsheet cells
+referencesSpreadsheetCells :: Text -> Bool
+referencesSpreadsheetCells = not . null . extractCellRefs
+
+-- | Evaluate a natural language request, routing to appropriate handler
 evaluateNaturalLanguage :: Text -> Grid -> Clonad CellValue
-evaluateNaturalLanguage request grid = do
+evaluateNaturalLanguage request grid
+  | referencesSpreadsheetCells request = evaluateSpreadsheetNL request grid
+  | otherwise = evaluateGeneralKnowledge request
+
+-- | Evaluate a general knowledge question (no cell references)
+evaluateGeneralKnowledge :: Text -> Clonad CellValue
+evaluateGeneralKnowledge request = do
+  result <-
+    clonad @Text @Text
+      ( T.unlines
+          [ "Answer this question directly and concisely.",
+            "",
+            "Rules:",
+            "- Return ONLY the answer (number, text, or TRUE/FALSE)",
+            "- For measurements, ALWAYS include units (km, miles, kg, etc.)",
+            "- For comparisons, include context (e.g., '109x larger')",
+            "- For factual questions, give a brief factual answer",
+            "- If the question cannot be answered, return ERROR: <reason>",
+            "",
+            "Examples:",
+            "\"how big is the sun\" -> 1.39 million km diameter",
+            "\"how big is the sun in miles\" -> 864,000 miles diameter",
+            "\"what is the capital of France\" -> Paris",
+            "\"is 17 a prime number\" -> TRUE",
+            "\"what is 2+2\" -> 4",
+            "\"how big is the sun vs earth\" -> 109x larger (sun is 1.39M km, earth is 12,742 km)"
+          ]
+      )
+      request
+  pure $ parseResult result
+
+-- | Evaluate a natural language request that references spreadsheet cells
+evaluateSpreadsheetNL :: Text -> Grid -> Clonad CellValue
+evaluateSpreadsheetNL request grid = do
   let nlContext = buildNLGridContext grid
   result <-
     clonad @(Text, Text) @Text
@@ -351,35 +388,55 @@ evaluateNaturalLanguage request grid = do
           [ "You are a spreadsheet assistant. Interpret this natural language request.",
             "Analyze the request and spreadsheet data, then compute the answer.",
             "",
+            "Context format: CELL=VALUE (from: original formula)",
+            "The '(from: ...)' shows how the value was calculated, preserving units and meaning.",
+            "",
             "Rules:",
             "- Return ONLY the computed result (number, text, or TRUE/FALSE)",
-            "- For numeric results, return just the number",
+            "- For numeric results, include units when the source has units",
+            "- Use the '(from: ...)' provenance to understand what each cell represents",
+            "- For meta-questions about units or meaning, look at the provenance",
             "- If unclear or impossible, return ERROR: <reason>",
             "",
             "Examples:",
             "\"what's the sum of all values?\" with A1=100, A2=200 -> 300",
             "\"is A1 greater than B1?\" with A1=50, B1=30 -> TRUE",
-            "\"convert A1 from celsius to fahrenheit\" with A1=100 -> 212",
-            "\"what percent is A1 of B1?\" with A1=25, B1=100 -> 25",
-            "\"is C1 a prime number?\" with C1=17 -> TRUE"
+            "\"convert A1 to fahrenheit\" with A1=100 (from: celsius temp) -> 212",
+            "\"what unit is A1\" with A1=1000000 (from: how big is the sun in km) -> km",
+            "\"what does A1 represent\" with A1=870000 (from: convert sun diameter to miles) -> sun diameter in miles",
+            "\"how big is A1 vs the earth\" with A1=870000 (from: sun in miles) -> about 109x larger (Earth is ~7,918 miles diameter)",
+            "\"convert A1 to miles\" with A1=\"1.4 million km\" -> 870,000 miles",
+            "\"what percent is A1 of B1?\" with A1=25, B1=100 -> 25%"
           ]
       )
       (request, nlContext)
   pure $ parseResult result
 
 -- | Build a richer grid context for natural language evaluation
+-- Includes both computed values and original formulas for provenance
 buildNLGridContext :: Grid -> Text
 buildNLGridContext grid
   | null cellInfo = "The spreadsheet is empty."
   | otherwise = T.intercalate ", " cellInfo
   where
     cellInfo =
-      [ coordToRef coord <> "=" <> formatCellForContext cell
+      [ formatCellWithProvenance coord cell
       | (coord, cell) <- gridToList grid,
         cellValue cell /= CellEmpty
       ]
 
-    formatCellForContext cell = case cellValue cell of
+    formatCellWithProvenance coord cell =
+      let ref = coordToRef coord
+          valueStr = formatCellValue cell
+          -- Include formula for provenance when it differs from value
+          provenanceStr = case cellFormula cell of
+            Just formula
+              | isFormula formula ->
+                  " (from: " <> T.drop 1 (T.strip formula) <> ")"
+            _ -> ""
+       in ref <> "=" <> valueStr <> provenanceStr
+
+    formatCellValue cell = case cellValue cell of
       CellNumber n -> T.pack (showNumber n)
       CellText t -> "\"" <> t <> "\""
       CellBoolean b -> if b then "TRUE" else "FALSE"
