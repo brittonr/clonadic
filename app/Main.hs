@@ -45,6 +45,9 @@ data AppState = AppState
     appConfig :: Config
   }
 
+readAppState :: AppState -> IO (Grid, Stats)
+readAppState AppState {..} = (,) <$> readTVarIO appGrid <*> readTVarIO appStats
+
 -- Create ClonadEnv from config
 mkClonadEnvFromConfig :: LlmConfig -> ClonadEnv
 mkClonadEnvFromConfig llmCfg = case llmProvider llmCfg of
@@ -87,7 +90,7 @@ main = do
 
     -- Get the current grid state
     get "/api/grid" $ do
-      (grid, stats) <- liftIO $ (,) <$> readTVarIO (appGrid state) <*> readTVarIO (appStats state)
+      (grid, stats) <- liftIO $ readAppState state
       json $
         object
           [ "cells" .= gridToJson grid,
@@ -131,11 +134,11 @@ jsonParam name = do
     Just obj -> case lookupAndParse name obj of
       Nothing -> do
         status status400
-        text $ TL.pack $ "Missing parameter: " ++ TL.unpack name
+        text $ "Missing parameter: " <> name
         finish
       Just (Aeson.Error msg) -> do
         status status400
-        text $ TL.pack $ "Invalid parameter '" ++ TL.unpack name ++ "': " ++ msg
+        text $ "Invalid parameter '" <> name <> "': " <> TL.pack msg
         finish
       Just (Aeson.Success val) -> pure val
   where
@@ -148,7 +151,7 @@ gridToJson :: Grid -> Aeson.Value
 gridToJson grid =
   Aeson.Object $
     KM.fromList
-      [ (Key.fromString (show row ++ "," ++ show col), cellToJson cell)
+      [ (Key.fromString $ show row <> "," <> show col, cellToJson cell)
       | ((row, col), cell) <- Map.toList grid
       ]
 
@@ -182,7 +185,7 @@ handleClearCell :: AppState -> Coord -> IO Aeson.Value
 handleClearCell AppState {..} coord = do
   atomically $ modifyTVar' appGrid (Map.delete coord)
   recalculateDependents appEnv appGrid appStats appConfig coord
-  (grid, stats) <- (,) <$> readTVarIO appGrid <*> readTVarIO appStats
+  (grid, stats) <- readAppState AppState {..}
   pure $ mkCellResponse (Cell CellEmpty Nothing "") grid stats
 
 handleFormulaCell :: AppState -> Coord -> Text -> IO Aeson.Value
@@ -204,7 +207,7 @@ handleFormulaCell AppState {..} coord formula = do
       statsCfg = configStats appConfig
   updateGridAndStats appGrid appStats statsCfg coord newCell
   recalculateDependents appEnv appGrid appStats appConfig coord
-  (updatedGrid, stats) <- (,) <$> readTVarIO appGrid <*> readTVarIO appStats
+  (updatedGrid, stats) <- readAppState AppState {..}
   pure $ mkCellResponse newCell updatedGrid stats
 
 handleLiteralCell :: AppState -> Coord -> Text -> IO Aeson.Value
@@ -221,7 +224,7 @@ handleLiteralCell AppState {..} coord value = do
           }
   atomically $ modifyTVar' appGrid (Map.insert coord newCell)
   recalculateDependents appEnv appGrid appStats appConfig coord
-  (updatedGrid, stats) <- (,) <$> readTVarIO appGrid <*> readTVarIO appStats
+  (updatedGrid, stats) <- readAppState AppState {..}
   pure $ mkCellResponse newCell updatedGrid stats
 
 logFormulaEvaluation :: Text -> Grid -> IO ()
@@ -289,19 +292,6 @@ recalculateCell env gridVar statsVar cfg coord = do
         debugLogT $ "Result: " <> displayText
         debugLogT "==========================================="
         updateGridAndStats gridVar statsVar statsCfg coord newCell
-
-showNumber :: Double -> String
-showNumber n
-  | n == fromIntegral (round n :: Integer) = show (round n :: Integer)
-  | otherwise = show n
-
-cellValueToDisplay :: CellValue -> Text
-cellValueToDisplay = \case
-  CellEmpty -> ""
-  CellNumber n -> T.pack $ showNumber n
-  CellText t -> t
-  CellBoolean b -> if b then "TRUE" else "FALSE"
-  CellError e -> "ERROR: " <> e
 
 incrementStats :: StatsConfig -> Stats -> Stats
 incrementStats StatsConfig {..} Stats {..} =

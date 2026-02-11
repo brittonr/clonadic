@@ -23,9 +23,9 @@ import Toml (TomlCodec, (.=))
 import Toml qualified
 
 data ConfigError
-  = ConfigParseError Text
-  | ConfigFileError IOException
-  deriving (Show)
+  = ConfigParseError !Text
+  | ConfigFileError !IOException
+  deriving stock (Show, Eq)
 
 data Config = Config
   { configServer :: ServerConfig,

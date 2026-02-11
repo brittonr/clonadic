@@ -6,6 +6,11 @@ module Spreadsheet
     Coord,
     Stats (..),
 
+    -- * Cell Constructors
+    emptyCell,
+    mkFormulaCell,
+    mkLiteralCell,
+
     -- * Grid Operations
     emptyGrid,
     getCell,
@@ -36,6 +41,10 @@ module Spreadsheet
     extractCellRefs,
     findDependentCells,
 
+    -- * Display Helpers
+    cellValueToDisplay,
+    showNumber,
+
     -- * Debug helpers
     gridContextText,
   )
@@ -58,39 +67,42 @@ type Coord = (Int, Int) -- (row, col), 1-indexed
 
 data CellValue
   = CellEmpty
-  | CellNumber Double
-  | CellText Text
-  | CellBoolean Bool
-  | CellError Text
-  deriving (Show, Eq, Generic)
-
-instance ToJSON CellValue
-
-instance FromJSON CellValue
+  | CellNumber !Double
+  | CellText !Text
+  | CellBoolean !Bool
+  | CellError !Text
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (ToJSON, FromJSON)
 
 data Cell = Cell
-  { cellValue :: CellValue,
-    cellFormula :: Maybe Text, -- Raw formula if this is a formula cell
-    cellDisplay :: Text -- What to show in the UI
+  { cellValue :: !CellValue,
+    cellFormula :: !(Maybe Text), -- Raw formula if this is a formula cell
+    cellDisplay :: !Text -- What to show in the UI
   }
-  deriving (Show, Eq, Generic)
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (ToJSON, FromJSON)
 
-instance ToJSON Cell
+-- | An empty cell with no value, formula, or display text
+emptyCell :: Cell
+emptyCell = Cell CellEmpty Nothing T.empty
 
-instance FromJSON Cell
+-- | Create a formula cell with the given formula, computed value, and display text
+mkFormulaCell :: Text -> CellValue -> Text -> Cell
+mkFormulaCell formula value = Cell value (Just formula)
+
+-- | Create a literal cell (no formula) with the given value and display text
+mkLiteralCell :: CellValue -> Text -> Cell
+mkLiteralCell value = Cell value Nothing
 
 type Grid = Map Coord Cell
 
 data Stats = Stats
-  { statsOperations :: Int,
-    statsTokensEstimate :: Int,
-    statsCostEstimate :: Double
+  { statsOperations :: !Int,
+    statsTokensEstimate :: !Int,
+    statsCostEstimate :: !Double
   }
-  deriving (Show, Eq, Generic)
-
-instance ToJSON Stats
-
-instance FromJSON Stats
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (ToJSON, FromJSON)
 
 emptyStats :: Stats
 emptyStats = Stats 0 0 0.0
@@ -112,12 +124,12 @@ gridFromList = Map.fromList
 
 -- Convert (1, 1) to "A1", (1, 2) to "B1", etc.
 coordToRef :: Coord -> Text
-coordToRef (row, col) = T.pack $ colToLetter col ++ show row
+coordToRef (row, col) = colToLetter col <> T.pack (show row)
 
-colToLetter :: Int -> String
+colToLetter :: Int -> Text
 colToLetter n
-  | n <= 0 = ""
-  | otherwise = reverse $ unfoldr step n
+  | n <= 0 = T.empty
+  | otherwise = T.pack . reverse $ unfoldr step n
   where
     step 0 = Nothing
     step c =
@@ -126,12 +138,10 @@ colToLetter n
 
 -- Convert "A1" to (1, 1), "B2" to (2, 2), etc.
 refToCoord :: Text -> Maybe Coord
-refToCoord ref =
-  let (letters, digits) = T.span (not . isDigit) ref
-   in case (parseCol letters, parseRow digits) of
-        (Just col, Just row) -> Just (row, col)
-        _ -> Nothing
+refToCoord ref = (,) <$> parseRow digits <*> parseCol letters
   where
+    (letters, digits) = T.span (not . isDigit) ref
+
     parseCol :: Text -> Maybe Int
     parseCol t
       | T.null t = Nothing
@@ -212,39 +222,30 @@ parseResult t
 -- Autocomplete functionality
 
 data FormulaFunction = FormulaFunction
-  { funcName :: Text,
-    funcSignature :: Text,
-    funcDescription :: Text,
-    funcCategory :: Text
+  { funcName :: !Text,
+    funcSignature :: !Text,
+    funcDescription :: !Text,
+    funcCategory :: !Text
   }
-  deriving (Show, Eq, Generic)
-
-instance ToJSON FormulaFunction
-
-instance FromJSON FormulaFunction
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (ToJSON, FromJSON)
 
 data SuggestionType
   = SuggestionFunction
   | SuggestionCell
   | SuggestionRange
-  deriving (Show, Eq, Generic)
-
-instance ToJSON SuggestionType
-
-instance FromJSON SuggestionType
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (ToJSON, FromJSON)
 
 data Suggestion = Suggestion
-  { suggestionText :: Text,
-    suggestionDisplay :: Text,
-    suggestionDescription :: Text,
-    suggestionType :: SuggestionType,
-    suggestionInsert :: Text
+  { suggestionText :: !Text,
+    suggestionDisplay :: !Text,
+    suggestionDescription :: !Text,
+    suggestionType :: !SuggestionType,
+    suggestionInsert :: !Text
   }
-  deriving (Show, Eq, Generic)
-
-instance ToJSON Suggestion
-
-instance FromJSON Suggestion
+  deriving stock (Show, Eq, Generic)
+  deriving anyclass (ToJSON, FromJSON)
 
 formulaFunctions :: [FormulaFunction]
 formulaFunctions =
@@ -410,3 +411,18 @@ findDirectDependents targetCoord grid =
     coord /= targetCoord,
     maybe False (elem targetCoord . extractCellRefs) (cellFormula cell)
   ]
+
+-- | Format a number for display, showing integers without decimal places
+showNumber :: Double -> String
+showNumber n
+  | n == fromIntegral (round n :: Integer) = show (round n :: Integer)
+  | otherwise = show n
+
+-- | Convert a CellValue to its display text representation
+cellValueToDisplay :: CellValue -> Text
+cellValueToDisplay = \case
+  CellEmpty -> T.empty
+  CellNumber n -> T.pack $ showNumber n
+  CellText t -> t
+  CellBoolean b -> if b then "TRUE" else "FALSE"
+  CellError e -> "ERROR: " <> e
