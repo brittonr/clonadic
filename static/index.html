@@ -624,6 +624,192 @@
     .context-menu-submenu:hover .context-submenu {
       display: block;
     }
+
+    /* Welcome/Onboarding Modal */
+    .welcome-modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.85);
+      display: none;
+      justify-content: center;
+      align-items: center;
+      z-index: 1100;
+    }
+
+    .welcome-modal.active {
+      display: flex;
+    }
+
+    .welcome-content {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 32px 40px;
+      max-width: 680px;
+      width: 90%;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+
+    .welcome-content h2 {
+      margin-bottom: 8px;
+      font-size: 24px;
+      color: var(--text);
+    }
+
+    .welcome-content .subtitle {
+      color: var(--accent);
+      font-size: 14px;
+      margin-bottom: 24px;
+      font-style: italic;
+    }
+
+    .welcome-content h3 {
+      font-size: 14px;
+      color: var(--text);
+      margin: 20px 0 12px 0;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .welcome-content p {
+      margin-bottom: 12px;
+      color: var(--text-dim);
+      line-height: 1.6;
+      font-size: 13px;
+    }
+
+    .welcome-content code {
+      background: var(--bg);
+      padding: 2px 8px;
+      font-size: 12px;
+      color: var(--text);
+      border-radius: 3px;
+    }
+
+    .welcome-content .example-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin: 16px 0;
+    }
+
+    .welcome-content .example-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 12px;
+      border-radius: 4px;
+    }
+
+    .welcome-content .example-box .label {
+      font-size: 11px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+
+    .welcome-content .example-box code {
+      display: block;
+      margin: 4px 0;
+      background: transparent;
+      padding: 0;
+      color: var(--accent);
+    }
+
+    .welcome-content .example-box code.nl {
+      color: #8b5cf6;
+      font-style: italic;
+    }
+
+    .welcome-content .shortcuts {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+      margin: 12px 0;
+    }
+
+    .welcome-content .shortcut {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .welcome-content .shortcut kbd {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 2px 6px;
+      font-size: 11px;
+      min-width: 24px;
+      text-align: center;
+      border-radius: 3px;
+      color: var(--text);
+    }
+
+    .welcome-content .shortcut span {
+      color: var(--text-dim);
+    }
+
+    .welcome-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 28px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+    }
+
+    .welcome-footer label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-dim);
+      cursor: pointer;
+    }
+
+    .welcome-footer label input[type="checkbox"] {
+      width: 14px;
+      height: 14px;
+      cursor: pointer;
+    }
+
+    .welcome-footer .buttons {
+      display: flex;
+      gap: 12px;
+    }
+
+    .welcome-footer button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+
+    .welcome-tip {
+      background: rgba(139, 92, 246, 0.1);
+      border: 1px solid rgba(139, 92, 246, 0.3);
+      padding: 12px 16px;
+      margin: 16px 0;
+      border-radius: 4px;
+    }
+
+    .welcome-tip .tip-label {
+      color: #8b5cf6;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+
+    .welcome-tip p {
+      margin: 0;
+      color: var(--text);
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -631,6 +817,7 @@
     <div class="logo">Clon<span>adic</span></div>
     <div class="actions">
       <button onclick="recalculateAll()">Recalculate All</button>
+      <button onclick="showWelcome()">Help</button>
       <button onclick="showAbout()">About</button>
     </div>
   </header>
@@ -758,6 +945,66 @@
     </div>
   </div>
 
+  <!-- Welcome/Onboarding Modal -->
+  <div class="welcome-modal" id="welcome-modal">
+    <div class="welcome-content">
+      <h2>Welcome to Clonadic</h2>
+      <p class="subtitle">A spreadsheet where AI evaluates every formula</p>
+
+      <div class="welcome-tip">
+        <div class="tip-label">What makes this different</div>
+        <p>Unlike traditional spreadsheets, every formula here is interpreted by an LLM. This means you can type formulas in plain English!</p>
+      </div>
+
+      <h3>Getting Started</h3>
+      <p>Click any cell to select it, then type a value or formula in the formula bar above. Press <kbd>Enter</kbd> to confirm.</p>
+
+      <div class="example-grid">
+        <div class="example-box">
+          <div class="label">Traditional Formulas</div>
+          <code>=SUM(A1:A5)</code>
+          <code>=AVERAGE(B1:B10)</code>
+          <code>=A1 * B1 + 10</code>
+        </div>
+        <div class="example-box">
+          <div class="label">Natural Language</div>
+          <code class="nl">=what's the sum of column A?</code>
+          <code class="nl">=is B1 a prime number?</code>
+          <code class="nl">=convert A1 from C to F</code>
+        </div>
+      </div>
+
+      <h3>Point Mode</h3>
+      <p>While typing a formula, click cells to insert their references automatically. The formula bar turns blue and shows <em>"(click cells)"</em>.</p>
+
+      <h3>Keyboard Shortcuts</h3>
+      <div class="shortcuts">
+        <div class="shortcut"><kbd>Enter</kbd> <span>Edit / Submit</span></div>
+        <div class="shortcut"><kbd>Esc</kbd> <span>Cancel / Deselect</span></div>
+        <div class="shortcut"><kbd>Arrows</kbd> <span>Navigate cells</span></div>
+        <div class="shortcut"><kbd>Tab</kbd> <span>Accept autocomplete</span></div>
+        <div class="shortcut"><kbd>Ctrl+C</kbd> <span>Copy selection</span></div>
+        <div class="shortcut"><kbd>Ctrl+V</kbd> <span>Paste</span></div>
+        <div class="shortcut"><kbd>Delete</kbd> <span>Clear cell</span></div>
+        <div class="shortcut"><kbd>Shift+Arrows</kbd> <span>Extend selection</span></div>
+      </div>
+
+      <h3>Pro Tips</h3>
+      <p>Right-click cells for a context menu with cut, copy, paste, and insert/delete options. Drag to select multiple cells. The autocomplete dropdown suggests functions as you type.</p>
+
+      <div class="welcome-footer">
+        <label>
+          <input type="checkbox" id="welcome-dont-show">
+          Don't show this again
+        </label>
+        <div class="buttons">
+          <button onclick="showWelcomeHelp()">Show Help</button>
+          <button class="primary" onclick="dismissWelcome()">Get Started</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script>
     const ROWS = 20, COLS = 10, DELIM = '(),+-*/^&=<>: ';
 
@@ -817,7 +1064,59 @@
       setupAutocomplete();
       setupPointMode();
       setupContextMenu();
+      setupWelcomeModal();
       document.addEventListener('keydown', handleClipboardKeydown);
+    }
+
+    // Welcome Modal Functions
+    const WELCOME_STORAGE_KEY = 'clonadic_welcome_dismissed';
+
+    function setupWelcomeModal() {
+      // Check if user has dismissed the welcome modal permanently
+      const dismissed = localStorage.getItem(WELCOME_STORAGE_KEY);
+      if (!dismissed) {
+        showWelcome();
+      }
+
+      // Close on escape key
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && $('welcome-modal').classList.contains('active')) {
+          dismissWelcome();
+        }
+      });
+
+      // Close on click outside content
+      $('welcome-modal').addEventListener('click', e => {
+        if (e.target === $('welcome-modal')) {
+          dismissWelcome();
+        }
+      });
+    }
+
+    function showWelcome() {
+      $('welcome-modal').classList.add('active');
+    }
+
+    function dismissWelcome() {
+      const dontShow = $('welcome-dont-show').checked;
+      if (dontShow) {
+        localStorage.setItem(WELCOME_STORAGE_KEY, 'true');
+      }
+      $('welcome-modal').classList.remove('active');
+      // Focus the formula input for immediate interaction
+      $('formula-input').focus();
+    }
+
+    function showWelcomeHelp() {
+      // Dismiss the welcome modal and show the about modal
+      $('welcome-modal').classList.remove('active');
+      showAbout();
+    }
+
+    function resetWelcome() {
+      // Utility function to reset welcome state (for testing)
+      localStorage.removeItem(WELCOME_STORAGE_KEY);
+      showWelcome();
     }
 
     function setupAutocomplete() {
