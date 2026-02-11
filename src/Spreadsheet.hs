@@ -44,8 +44,10 @@ where
 import Clonad
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Char (isAsciiUpper, isDigit, ord)
+import Data.List (unfoldr)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (maybeToList)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -113,13 +115,14 @@ coordToRef :: Coord -> Text
 coordToRef (row, col) = T.pack $ colToLetter col ++ show row
 
 colToLetter :: Int -> String
-colToLetter = go []
+colToLetter n
+  | n <= 0 = ""
+  | otherwise = reverse $ unfoldr step n
   where
-    go acc c
-      | c <= 0 = acc
-      | otherwise =
-          let (q, r) = (c - 1) `divMod` 26
-           in go (toEnum (ord 'A' + r) : acc) q
+    step 0 = Nothing
+    step c =
+      let (q, r) = (c - 1) `divMod` 26
+       in Just (toEnum (ord 'A' + r), q)
 
 -- Convert "A1" to (1, 1), "B2" to (2, 2), etc.
 refToCoord :: Text -> Maybe Coord
@@ -306,14 +309,10 @@ formulaFunctions =
 
 getAutocompleteSuggestions :: Text -> Grid -> Int -> Int -> [Suggestion]
 getAutocompleteSuggestions input grid maxRows maxCols =
-  let trimmed = T.strip input
-   in if T.null trimmed
-        then []
-        else case T.uncons trimmed of
-          Just ('=', rest) ->
-            let lastToken = getLastToken rest
-             in getSuggestionsForToken lastToken grid maxRows maxCols
-          _ -> []
+  case T.uncons (T.strip input) of
+    Just ('=', rest) ->
+      getSuggestionsForToken (getLastToken rest) grid maxRows maxCols
+    _ -> []
 
 getLastToken :: Text -> Text
 getLastToken input =
@@ -326,7 +325,7 @@ getSuggestionsForToken :: Text -> Grid -> Int -> Int -> [Suggestion]
 getSuggestionsForToken token grid maxRows maxCols
   | T.null token = functionSuggestions ""
   | isLikelyColLetter token = cellSuggestions token grid maxRows maxCols
-  | otherwise = functionSuggestions token ++ cellSuggestions token grid maxRows maxCols
+  | otherwise = functionSuggestions token <> cellSuggestions token grid maxRows maxCols
 
 isLikelyColLetter :: Text -> Bool
 isLikelyColLetter t =
@@ -354,7 +353,7 @@ cellSuggestions prefix grid maxRows maxCols =
       nonEmptyCells = getNonEmptyCellRefs grid
       nonEmptySet = Set.fromList nonEmptyCells
       allCells = generateCellRefs maxRows maxCols
-      prioritizedCells = nonEmptyCells ++ filter (`Set.notMember` nonEmptySet) allCells
+      prioritizedCells = nonEmptyCells <> filter (`Set.notMember` nonEmptySet) allCells
       matches = filter (T.isPrefixOf upper . T.toUpper) prioritizedCells
    in map cellToSuggestion (take 8 matches)
 
@@ -399,11 +398,7 @@ extractCellRefs formula =
           case T.splitOn ":" token of
             [start, end] -> expandRange start end
             _ -> []
-      | otherwise =
-          -- Single cell reference
-          case refToCoord token of
-            Just coord -> [coord]
-            Nothing -> []
+      | otherwise = maybeToList (refToCoord token)
 
     expandRange :: Text -> Text -> [Coord]
     expandRange start end =

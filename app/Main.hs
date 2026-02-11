@@ -8,14 +8,15 @@ import Data.Aeson (object, (.=))
 import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
-import Data.List (nub)
+import Data.Foldable (traverse_)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Read qualified as TR
+import Data.Text.IO qualified as TIO
 import Data.Text.Lazy qualified as TL
+import Data.Text.Read qualified as TR
 import Network.HTTP.Types.Status (status400)
 import Network.Wai.Middleware.RequestLogger (logStdoutDev)
 import Network.Wai.Middleware.Static (addBase, staticPolicy)
@@ -27,14 +28,14 @@ loadConfigWithFallback path = do
   result <- loadConfig path
   case result of
     Left (ConfigFileError _) -> do
-      putStrLn $ "Config file not found at " ++ path ++ ", using defaults."
+      TIO.putStrLn $ "Config file not found at " <> T.pack path <> ", using defaults."
       pure defaultConfig
     Left (ConfigParseError err) -> do
-      putStrLn $ "Warning: Failed to parse config: " ++ T.unpack err
-      putStrLn "Using default configuration."
+      TIO.putStrLn $ "Warning: Failed to parse config: " <> err
+      TIO.putStrLn "Using default configuration."
       pure defaultConfig
     Right cfg -> do
-      putStrLn $ "Loaded config from " ++ path
+      TIO.putStrLn $ "Loaded config from " <> T.pack path
       pure cfg
 
 data AppState = AppState
@@ -61,14 +62,14 @@ mkClonadEnvFromConfig llmCfg = case llmProvider llmCfg of
 
 main :: IO ()
 main = do
-  putStrLn "Clonadic - Every formula evaluation is a prayer."
+  TIO.putStrLn "Clonadic - Every formula evaluation is a prayer."
 
   cfg <- loadConfigWithFallback "config.toml"
   let port = serverPort (configServer cfg)
       llmCfg = configLlm cfg
-  putStrLn $ "Starting server on http://" ++ T.unpack (serverHost (configServer cfg)) ++ ":" ++ show port
-  putStrLn $ "LLM Provider: " ++ show (llmProvider llmCfg)
-  putStrLn $ "LLM Model: " ++ T.unpack (llmModel llmCfg)
+  TIO.putStrLn $ "Starting server on http://" <> serverHost (configServer cfg) <> ":" <> T.pack (show port)
+  TIO.putStrLn $ "LLM Provider: " <> T.pack (show (llmProvider llmCfg))
+  TIO.putStrLn $ "LLM Model: " <> llmModel llmCfg
 
   let env = mkClonadEnvFromConfig llmCfg
   gridVar <- newTVarIO emptyGrid
@@ -192,10 +193,10 @@ handleFormulaCell AppState {..} coord formula = do
   grid <- readTVarIO appGrid
   logFormulaEvaluation formula grid
   result <- runClonad appEnv $ withTemperature 0.0 $ evaluateFormula formula grid
-  debugLog "--- LLM RESPONSE ---"
-  debugLog $ "Result: " ++ show result
-  debugLog "==========================================="
-  debugLog ""
+  debugLogT "--- LLM RESPONSE ---"
+  debugLogT $ "Result: " <> T.pack (show result)
+  debugLogT "==========================================="
+  debugLogT ""
   let displayText = cellValueToDisplay result
       newCell =
         Cell
@@ -204,9 +205,7 @@ handleFormulaCell AppState {..} coord formula = do
             cellDisplay = displayText
           }
       statsCfg = configStats appConfig
-  atomically $ do
-    modifyTVar' appGrid (Map.insert coord newCell)
-    modifyTVar' appStats (incrementStats statsCfg)
+  updateGridAndStats appGrid appStats statsCfg coord newCell
   recalculateDependents appEnv appGrid appStats appConfig coord
   updatedGrid <- readTVarIO appGrid
   stats <- readTVarIO appStats
@@ -232,71 +231,69 @@ handleLiteralCell AppState {..} coord value = do
 
 logFormulaEvaluation :: Text -> Grid -> IO ()
 logFormulaEvaluation formula grid = do
-  debugLog ""
-  debugLog "========== FORMULA EVALUATION =========="
-  debugLog $ "Formula: " ++ T.unpack formula
+  debugLogT ""
+  debugLogT "========== FORMULA EVALUATION =========="
+  debugLogT $ "Formula: " <> formula
   let refs = extractCellRefs formula
-  debugLog $ "Cell refs found: " ++ show refs
+  debugLogT $ "Cell refs found: " <> T.pack (show refs)
   when debugEnabled $
     forM_ refs $ \refCoord -> do
       let refCell = getCell refCoord grid
-      debugLog $ "  " ++ show refCoord ++ " -> " ++ T.unpack (cellDisplay refCell)
+      debugLogT $ "  " <> T.pack (show refCoord) <> " -> " <> cellDisplay refCell
   let ctx = gridContextText grid
-  debugLog ""
-  debugLog "--- PROMPT TO LLM ---"
-  debugLog "System: You are a spreadsheet formula engine. Evaluate the given formula."
-  debugLog "        Cell values are provided as context. Return ONLY the numeric result."
-  debugLog "        If the formula is invalid or references empty cells, return 'ERROR: <reason>'."
-  debugLog "        Do not explain. Just the number or error."
-  debugLog ""
-  debugLog $ "Input tuple: (\"" ++ T.unpack formula ++ "\", \"" ++ T.unpack ctx ++ "\")"
-  debugLog "--- END PROMPT ---"
-  debugLog ""
+  debugLogT ""
+  debugLogT "--- PROMPT TO LLM ---"
+  debugLogT "System: You are a spreadsheet formula engine. Evaluate the given formula."
+  debugLogT "        Cell values are provided as context. Return ONLY the numeric result."
+  debugLogT "        If the formula is invalid or references empty cells, return 'ERROR: <reason>'."
+  debugLogT "        Do not explain. Just the number or error."
+  debugLogT ""
+  debugLogT $ "Input tuple: (\"" <> formula <> "\", \"" <> ctx <> "\")"
+  debugLogT "--- END PROMPT ---"
+  debugLogT ""
 
 -- Recalculate all cells that depend on the changed cell
 recalculateDependents :: ClonadEnv -> TVar Grid -> TVar Stats -> Config -> Coord -> IO ()
 recalculateDependents env gridVar statsVar cfg changedCoord = do
   grid <- readTVarIO gridVar
-  let dependents = nub $ findDependentCells changedCoord grid
-  debugLog $ "Changed cell: " ++ show changedCoord
-  debugLog $ "Found dependents: " ++ show dependents
+  let dependents = findDependentCells changedCoord grid
+  debugLogT $ "Changed cell: " <> T.pack (show changedCoord)
+  debugLogT $ "Found dependents: " <> T.pack (show dependents)
   when debugEnabled $ do
     let formulas = [(c, f) | (c, cell) <- Map.toList grid, Just f <- [cellFormula cell]]
-    debugLog $ "All formulas in grid: " ++ show formulas
-  mapM_ (recalculateCell env gridVar statsVar cfg) dependents
+    debugLogT $ "All formulas in grid: " <> T.pack (show formulas)
+  traverse_ (recalculateCell env gridVar statsVar cfg) dependents
 
 recalculateCell :: ClonadEnv -> TVar Grid -> TVar Stats -> Config -> Coord -> IO ()
 recalculateCell env gridVar statsVar cfg coord = do
   grid <- readTVarIO gridVar
   case Map.lookup coord grid of
-    Nothing -> debugLog $ "  Cell " ++ show coord ++ " not found in grid"
+    Nothing -> debugLogT $ "  Cell " <> T.pack (show coord) <> " not found in grid"
     Just cell -> case cellFormula cell of
-      Nothing -> debugLog $ "  Cell " ++ show coord ++ " has no formula"
+      Nothing -> debugLogT $ "  Cell " <> T.pack (show coord) <> " has no formula"
       Just formula -> do
-        debugLog ""
-        debugLog $ "========== RECALCULATING " ++ show coord ++ " =========="
-        debugLog $ "Formula: " ++ T.unpack formula
+        debugLogT ""
+        debugLogT $ "========== RECALCULATING " <> T.pack (show coord) <> " =========="
+        debugLogT $ "Formula: " <> formula
         let refs = extractCellRefs formula
-        debugLog $ "Cell refs: " ++ show refs
+        debugLogT $ "Cell refs: " <> T.pack (show refs)
         when debugEnabled $
           forM_ refs $ \refCoord -> do
             let refCell = getCell refCoord grid
-            debugLog $ "  " ++ show refCoord ++ " -> " ++ T.unpack (cellDisplay refCell)
+            debugLogT $ "  " <> T.pack (show refCoord) <> " -> " <> cellDisplay refCell
         let ctx = gridContextText grid
-        debugLog ""
-        debugLog "--- PROMPT TO LLM ---"
-        debugLog $ "Input: (\"" ++ T.unpack formula ++ "\", \"" ++ T.unpack ctx ++ "\")"
-        debugLog "--- END PROMPT ---"
+        debugLogT ""
+        debugLogT "--- PROMPT TO LLM ---"
+        debugLogT $ "Input: (\"" <> formula <> "\", \"" <> ctx <> "\")"
+        debugLogT "--- END PROMPT ---"
         result <- runClonad env $ withTemperature 0.0 $ evaluateFormula formula grid
         let displayText = cellValueToDisplay result
             newCell = cell {cellValue = result, cellDisplay = displayText}
             statsCfg = configStats cfg
-        debugLog "--- LLM RESPONSE ---"
-        debugLog $ "Result: " ++ T.unpack displayText
-        debugLog "==========================================="
-        atomically $ do
-          modifyTVar' gridVar (Map.insert coord newCell)
-          modifyTVar' statsVar (incrementStats statsCfg)
+        debugLogT "--- LLM RESPONSE ---"
+        debugLogT $ "Result: " <> displayText
+        debugLogT "==========================================="
+        updateGridAndStats gridVar statsVar statsCfg coord newCell
 
 showNumber :: Double -> String
 showNumber n
@@ -332,8 +329,15 @@ mkCellResponse cell grid stats =
 debugEnabled :: Bool
 debugEnabled = False
 
-debugLog :: String -> IO ()
-debugLog msg = when debugEnabled $ putStrLn msg
+debugLogT :: Text -> IO ()
+debugLogT msg = when debugEnabled $ TIO.putStrLn msg
+
+-- STM helper for common grid+stats update pattern
+updateGridAndStats :: TVar Grid -> TVar Stats -> StatsConfig -> Coord -> Cell -> IO ()
+updateGridAndStats gridVar statsVar statsCfg coord cell =
+  atomically $ do
+    modifyTVar' gridVar (Map.insert coord cell)
+    modifyTVar' statsVar (incrementStats statsCfg)
 
 recalculateAll :: AppState -> IO Aeson.Value
 recalculateAll AppState {..} = do
