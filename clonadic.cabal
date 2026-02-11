@@ -15,6 +15,10 @@ library
                   , Config
   hs-source-dirs:   src
   default-language:  GHC2024
+  default-extensions:
+    ImportQualifiedPost
+    OverloadedStrings
+    RecordWildCards
   build-depends:
       base           >= 4.14  && < 5
     , aeson          >= 2.0   && < 2.3
@@ -28,6 +32,11 @@ executable clonadic
   main-is:          Main.hs
   hs-source-dirs:   app
   default-language:  GHC2024
+  default-extensions:
+    ImportQualifiedPost
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
   build-depends:
       base           >= 4.14  && < 5
     , aeson          >= 2.0   && < 2.3

@@ -1,7 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
-
 module Spreadsheet
   ( -- * Types
     Cell (..),
@@ -50,8 +46,10 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.Char (isAsciiUpper, isDigit, ord)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Read qualified as TR
 import GHC.Generics (Generic)
 
 type Coord = (Int, Int) -- (row, col), 1-indexed
@@ -137,8 +135,8 @@ refToCoord ref =
       | otherwise = Just $ T.foldl' (\acc c -> acc * 26 + (ord c - ord 'A' + 1)) 0 (T.toUpper t)
 
     parseRow :: Text -> Maybe Int
-    parseRow t = case reads (T.unpack t) of
-      [(n, "")] | n > 0 -> Just n
+    parseRow t = case TR.decimal t of
+      Right (n, rest) | T.null rest && n > 0 -> Just n
       _ -> Nothing
 
 isFormula :: Text -> Bool
@@ -215,7 +213,7 @@ parseResult t
       CellError (T.strip $ T.drop 6 stripped)
   | upper == "TRUE" = CellBoolean True
   | upper == "FALSE" = CellBoolean False
-  | [(n, "")] <- reads (T.unpack stripped) = CellNumber n
+  | Right (n, rest) <- TR.double stripped, T.null rest = CellNumber n
   | otherwise = CellText stripped
   where
     stripped = T.strip t
@@ -354,8 +352,9 @@ cellSuggestions :: Text -> Grid -> Int -> Int -> [Suggestion]
 cellSuggestions prefix grid maxRows maxCols =
   let upper = T.toUpper prefix
       nonEmptyCells = getNonEmptyCellRefs grid
+      nonEmptySet = Set.fromList nonEmptyCells
       allCells = generateCellRefs maxRows maxCols
-      prioritizedCells = nonEmptyCells ++ filter (`notElem` nonEmptyCells) allCells
+      prioritizedCells = nonEmptyCells ++ filter (`Set.notMember` nonEmptySet) allCells
       matches = filter (T.isPrefixOf upper . T.toUpper) prioritizedCells
    in map cellToSuggestion (take 8 matches)
 
@@ -365,7 +364,7 @@ getNonEmptyCellRefs grid =
 
 generateCellRefs :: Int -> Int -> [Text]
 generateCellRefs maxRows maxCols =
-  [T.pack (colToLetter col) <> T.pack (show row) | row <- [1 .. maxRows], col <- [1 .. maxCols]]
+  [coordToRef (row, col) | row <- [1 .. maxRows], col <- [1 .. maxCols]]
 
 cellToSuggestion :: Text -> Suggestion
 cellToSuggestion ref =
@@ -414,10 +413,17 @@ extractCellRefs formula =
         _ -> []
 
 -- Find all cells that depend on a given coordinate (directly or indirectly)
+-- Uses Set for visited tracking to prevent infinite loops on circular references
 findDependentCells :: Coord -> Grid -> [Coord]
-findDependentCells changedCoord grid =
-  let directDeps = findDirectDependents changedCoord grid
-   in directDeps ++ concatMap (`findDependentCells` grid) directDeps
+findDependentCells changedCoord grid = go Set.empty [changedCoord]
+  where
+    go _ [] = []
+    go visited (c : cs)
+      | Set.member c visited = go visited cs
+      | otherwise =
+          let directDeps = findDirectDependents c grid
+              newDeps = filter (`Set.notMember` visited) directDeps
+           in directDeps ++ go (Set.insert c visited) (newDeps ++ cs)
 
 -- Find cells that directly reference the given coordinate
 findDirectDependents :: Coord -> Grid -> [Coord]

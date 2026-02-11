@@ -1,7 +1,3 @@
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
-
 module Main where
 
 import Clonad (ApiKey, ClonadEnv, ModelId, mkEnv, mkOllamaEnv, mkOpenAIEnv, runClonad, withTemperature)
@@ -18,6 +14,7 @@ import Data.Maybe (fromMaybe, isJust)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Read qualified as TR
 import Data.Text.Lazy qualified as TL
 import Network.HTTP.Types.Status (status400)
 import Network.Wai.Middleware.RequestLogger (logStdoutDev)
@@ -217,8 +214,8 @@ handleFormulaCell AppState {..} coord formula = do
 
 handleLiteralCell :: AppState -> Coord -> Text -> IO Aeson.Value
 handleLiteralCell AppState {..} coord value = do
-  let cellVal = case reads (T.unpack value) of
-        [(n, "")] -> CellNumber n
+  let cellVal = case TR.double value of
+        Right (n, rest) | T.null rest -> CellNumber n
         _ -> CellText value
       displayText = cellValueToDisplay cellVal
       newCell =
@@ -238,8 +235,8 @@ logFormulaEvaluation formula grid = do
   debugLog ""
   debugLog "========== FORMULA EVALUATION =========="
   debugLog $ "Formula: " ++ T.unpack formula
-  debugLog $ "Cell refs found: " ++ show (extractCellRefs formula)
   let refs = extractCellRefs formula
+  debugLog $ "Cell refs found: " ++ show refs
   when debugEnabled $
     forM_ refs $ \refCoord -> do
       let refCell = getCell refCoord grid
@@ -315,11 +312,11 @@ cellValueToDisplay = \case
   CellError e -> "ERROR: " <> e
 
 incrementStats :: StatsConfig -> Stats -> Stats
-incrementStats statsCfg s =
-  s
-    { statsOperations = statsOperations s + 1,
-      statsTokensEstimate = statsTokensEstimate s + statsTokensPerOp statsCfg,
-      statsCostEstimate = statsCostEstimate s + statsCostPerOp statsCfg
+incrementStats StatsConfig {..} Stats {..} =
+  Stats
+    { statsOperations = statsOperations + 1,
+      statsTokensEstimate = statsTokensEstimate + statsTokensPerOp,
+      statsCostEstimate = statsCostEstimate + statsCostPerOp
     }
 
 mkCellResponse :: Cell -> Grid -> Stats -> Aeson.Value
@@ -341,7 +338,7 @@ debugLog msg = when debugEnabled $ putStrLn msg
 recalculateAll :: AppState -> IO Aeson.Value
 recalculateAll AppState {..} = do
   grid <- readTVarIO appGrid
-  let formulaCells = [(coord, cell) | (coord, cell) <- Map.toList grid, isFormulaCell cell]
+  let formulaCells = Map.toList $ Map.filter (isJust . cellFormula) grid
 
   -- Evaluate each formula cell (the API call storm)
   newGrid <- foldM (recalcCell appEnv appStats appConfig) grid formulaCells
@@ -356,8 +353,6 @@ recalculateAll AppState {..} = do
         "stats" .= stats,
         "recalculated" .= length formulaCells
       ]
-  where
-    isFormulaCell = isJust . cellFormula
 
 recalcCell :: ClonadEnv -> TVar Stats -> Config -> Grid -> (Coord, Cell) -> IO Grid
 recalcCell env statsVar cfg grid (coord, cell) = do
