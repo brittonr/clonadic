@@ -235,8 +235,8 @@ handleFormulaCell coord formula = do
   grid <- readGridM
   logFormulaEvaluation formula grid
   newCell <- liftIO $ evaluateAndBuildCell appEnv formula grid
-  debugLog "--- LLM RESPONSE ---"
-  debugLog $ "Result: " <> showT (cellValue newCell)
+  -- Always log result (not just in debug mode)
+  liftIO $ TIO.putStrLn $ "  Result: " <> cellDisplay newCell
   debugLog "==========================================="
   liftIO $ updateGridAndStats appGrid appStats (configStats appConfig) coord newCell
   recalculateDependents coord
