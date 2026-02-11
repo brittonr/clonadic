@@ -41,7 +41,6 @@ module Spreadsheet
     -- * Formula Evaluation (via Claude)
     evaluateFormula,
     isFormula,
-    isNaturalLanguage,
 
     -- * Stats
     emptyStats,
@@ -79,7 +78,7 @@ import Data.Functor (($>))
 import Data.List qualified as List (unfoldr)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe, maybeToList)
+import Data.Maybe (fromMaybe, maybeToList)
 import Data.Sequence (Seq (..))
 import Data.Sequence qualified as Seq
 import Data.Set qualified as Set
@@ -302,21 +301,6 @@ refToCoord = either (const Nothing) Just . A.parseOnly (coordP <* A.endOfInput) 
 isFormula :: Text -> Bool
 isFormula t = T.isPrefixOf "=" (T.strip t)
 
--- | Detect if a formula appears to be natural language rather than traditional spreadsheet syntax
-isNaturalLanguage :: Text -> Bool
-isNaturalLanguage formula =
-  let stripped = T.toLower $ T.strip formula
-      hasQuestionWord =
-        any
-          (`T.isPrefixOf` stripped)
-          ["what", "how", "calculate", "compute", "find", "is ", "are ", "convert", "show", "tell", "give"]
-      hasTraditionalPattern =
-        any
-          (\f -> T.toUpper f `T.isInfixOf` T.toUpper stripped)
-          ["SUM(", "AVERAGE(", "IF(", "VLOOKUP(", "COUNT(", "MIN(", "MAX(", "CONCAT("]
-      wordCount = length $ T.words stripped
-   in (hasQuestionWord || wordCount > 4) && not hasTraditionalPattern
-
 -- | Parse Excel-style quoted string literal: ="text" -> Just text
 -- Returns the unquoted content if the formula is a simple quoted string
 parseQuotedLiteral :: Text -> Maybe Text
@@ -336,10 +320,7 @@ evaluateFormula formulaText grid = do
   -- Check for quoted string literal first (Excel-style ="text")
   case parseQuotedLiteral formula of
     Just literal -> pure $ CellText literal
-    Nothing ->
-      if isNaturalLanguage formula
-        then evaluateNaturalLanguage formula grid
-        else evaluateTraditionalFormula formulaText grid
+    Nothing -> evaluateNaturalLanguage formula grid
 
 -- | Check if a natural language query references spreadsheet cells
 referencesSpreadsheetCells :: Text -> Bool
@@ -441,41 +422,6 @@ buildNLGridContext grid
       CellText t -> "\"" <> t <> "\""
       CellBoolean b -> if b then "TRUE" else "FALSE"
       _ -> ""
-
--- | Evaluate a traditional spreadsheet formula
-evaluateTraditionalFormula :: Text -> Grid -> Clonad CellValue
-evaluateTraditionalFormula formulaText grid = do
-  let formula = T.strip formulaText
-      refs = extractCellRefs formula
-      nonEmpty = mapMaybe (\coord -> (coordToRef coord,) <$> getCellNumericValue coord grid) refs
-      valuesText =
-        if null nonEmpty
-          then "All cells are empty (value 0)"
-          else T.intercalate ", " [ref <> "=" <> T.pack (show v) | (ref, v) <- nonEmpty]
-  result <-
-    clonad @(Text, Text) @Text
-      ( T.unlines
-          [ "Evaluate this spreadsheet formula. Return ONLY the numeric answer.",
-            "",
-            "Rules:",
-            "- Empty cells = 0",
-            "- SUM adds all values",
-            "- Return just the number, nothing else",
-            "",
-            "Examples:",
-            "=SUM(A1:A3) with A1=1, A2=2, A3=3 -> 6",
-            "=SUM(A1:A3) with A1=5 -> 5",
-            "=2+2 -> 4",
-            "=A1*B1 with A1=10, B1=5 -> 50"
-          ]
-      )
-      (formula <> " with " <> valuesText, "")
-  pure $ parseResult result
-  where
-    getCellNumericValue :: Coord -> Grid -> Maybe Double
-    getCellNumericValue coord g = case cellValue (getCellOrEmpty coord g) of
-      CellNumber n -> Just n
-      _ -> Nothing
 
 gridContext :: Grid -> Text
 gridContext grid
