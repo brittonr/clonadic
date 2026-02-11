@@ -36,6 +36,7 @@ module Spreadsheet
 
     -- * Stats
     emptyStats,
+    singleOpStats,
 
     -- * Autocomplete
     FormulaFunction (..),
@@ -58,11 +59,15 @@ module Spreadsheet
 where
 
 import Clonad
+import Control.Applicative (some, (<|>))
+import Control.Monad (guard)
 import Data.Aeson (FromJSON (..), FromJSONKey (..), FromJSONKeyFunction (..), ToJSON (..), ToJSONKey (..), ToJSONKeyFunction (..))
 import Data.Aeson.Encoding qualified as E
 import Data.Aeson.Key qualified as Key
-import Data.Char (isAsciiUpper, isDigit, ord)
-import Data.List (unfoldr)
+import Data.Attoparsec.Text qualified as A
+import Data.Char (isAsciiUpper, ord)
+import Data.Functor (($>))
+import Data.List qualified as List (unfoldr)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe, maybeToList)
@@ -94,15 +99,11 @@ data Coord = Coord
 
 -- | Smart constructor for Row (must be >= 1)
 mkRow :: Int -> Maybe Row
-mkRow n
-  | n >= 1 = Just (Row n)
-  | otherwise = Nothing
+mkRow n = guard (n >= 1) $> Row n
 
 -- | Smart constructor for Col (must be >= 1)
 mkCol :: Int -> Maybe Col
-mkCol n
-  | n >= 1 = Just (Col n)
-  | otherwise = Nothing
+mkCol n = guard (n >= 1) $> Col n
 
 -- | Smart constructor for Coord with validation
 mkCoord :: Int -> Int -> Maybe Coord
@@ -168,8 +169,18 @@ data Stats = Stats
   deriving stock (Show, Eq, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
+instance Semigroup Stats where
+  Stats o1 t1 c1 <> Stats o2 t2 c2 = Stats (o1 + o2) (t1 + t2) (c1 + c2)
+
+instance Monoid Stats where
+  mempty = Stats 0 0 0.0
+
 emptyStats :: Stats
-emptyStats = Stats 0 0 0.0
+emptyStats = mempty
+
+-- | Create stats for a single operation with the given tokens and cost
+singleOpStats :: Int -> Double -> Stats
+singleOpStats = Stats 1
 
 emptyGrid :: Grid
 emptyGrid = Map.empty
@@ -194,28 +205,50 @@ coordToRef (Coord (Row row) col) = colToLetter col <> T.pack (show row)
 colToLetter :: Col -> Text
 colToLetter (Col n)
   | n <= 0 = T.empty
-  | otherwise = T.pack . reverse $ unfoldr step n
+  | otherwise = T.pack . reverse $ List.unfoldr step n
   where
     step 0 = Nothing
     step c =
       let (q, r) = (c - 1) `divMod` 26
        in Just (toEnum (ord 'A' + r), q)
 
+-- Attoparsec parsers for cell references
+
+-- | Parse column letters (A, B, ..., Z, AA, AB, ...)
+columnP :: A.Parser Col
+columnP = do
+  letters <- some (A.satisfy isAsciiUpper)
+  pure . Col $ foldl' (\acc c -> acc * 26 + (ord c - ord 'A' + 1)) 0 letters
+
+-- | Parse row number (positive integer >= 1)
+rowP :: A.Parser Row
+rowP = do
+  n <- A.decimal
+  guard (n >= 1)
+  pure (Row n)
+
+-- | Parse a cell coordinate (e.g., A1, AA99)
+coordP :: A.Parser Coord
+coordP = do
+  col <- columnP
+  row <- rowP
+  pure (Coord row col)
+
+-- | Parse a range (e.g., A1:B3)
+rangeP :: A.Parser [Coord]
+rangeP = do
+  start <- coordP
+  _ <- A.char ':'
+  expandRangeCoords start <$> coordP
+
+-- | Expand a range from start to end coordinates
+expandRangeCoords :: Coord -> Coord -> [Coord]
+expandRangeCoords (Coord (Row r1) (Col c1)) (Coord (Row r2) (Col c2)) =
+  [Coord (Row r) (Col c) | r <- [min r1 r2 .. max r1 r2], c <- [min c1 c2 .. max c1 c2]]
+
 -- | Parse spreadsheet reference to Coord (e.g., "A1" -> Just (Coord 1 1))
 refToCoord :: Text -> Maybe Coord
-refToCoord ref = Coord <$> parseRow digits <*> parseCol letters
-  where
-    (letters, digits) = T.span (not . isDigit) ref
-
-    parseCol :: Text -> Maybe Col
-    parseCol t
-      | T.null t = Nothing
-      | otherwise = Just . Col $ T.foldl' (\acc c -> acc * 26 + (ord c - ord 'A' + 1)) 0 (T.toUpper t)
-
-    parseRow :: Text -> Maybe Row
-    parseRow t = case TR.decimal t of
-      Right (n, rest) | T.null rest && n > 0 -> Just (Row n)
-      _ -> Nothing
+refToCoord = either (const Nothing) Just . A.parseOnly (coordP <* A.endOfInput) . T.toUpper
 
 isFormula :: Text -> Bool
 isFormula t = T.isPrefixOf "=" (T.strip t)
@@ -280,8 +313,7 @@ gridContextText = gridContext
 parseResult :: Text -> CellValue
 parseResult t
   | T.null stripped = CellEmpty
-  | Just errMsg <- T.stripPrefix "ERROR:" stripped = CellError (T.strip errMsg)
-  | Just errMsg <- T.stripPrefix "ERROR " stripped = CellError (T.strip errMsg)
+  | Just errMsg <- parseError stripped = CellError errMsg
   | upper == "TRUE" = CellBoolean True
   | upper == "FALSE" = CellBoolean False
   | Right (n, rest) <- TR.double stripped, T.null rest = CellNumber n
@@ -289,6 +321,7 @@ parseResult t
   where
     stripped = T.strip t
     upper = T.toUpper stripped
+    parseError s = T.strip <$> (T.stripPrefix "ERROR:" s <|> T.stripPrefix "ERROR " s)
 
 -- Autocomplete functionality
 
@@ -318,10 +351,10 @@ data Suggestion = Suggestion
   deriving stock (Show, Eq, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
-formulaFunctions :: [FormulaFunction]
-formulaFunctions =
-  [ -- Math functions
-    FormulaFunction "SUM" "SUM(range)" "Adds all numbers in a range" "Math",
+-- | Math functions for numerical operations
+mathFunctions :: [FormulaFunction]
+mathFunctions =
+  [ FormulaFunction "SUM" "SUM(range)" "Adds all numbers in a range" "Math",
     FormulaFunction "AVERAGE" "AVERAGE(range)" "Returns the average of numbers" "Math",
     FormulaFunction "MIN" "MIN(range)" "Returns the minimum value" "Math",
     FormulaFunction "MAX" "MAX(range)" "Returns the maximum value" "Math",
@@ -334,17 +367,25 @@ formulaFunctions =
     FormulaFunction "POWER" "POWER(base, exponent)" "Returns base raised to power" "Math",
     FormulaFunction "MOD" "MOD(number, divisor)" "Returns remainder after division" "Math",
     FormulaFunction "PRODUCT" "PRODUCT(range)" "Multiplies all numbers in range" "Math",
-    FormulaFunction "MEDIAN" "MEDIAN(range)" "Returns the median value" "Math",
-    -- Logical functions
-    FormulaFunction "IF" "IF(condition, true_val, false_val)" "Conditional evaluation" "Logic",
+    FormulaFunction "MEDIAN" "MEDIAN(range)" "Returns the median value" "Math"
+  ]
+
+-- | Logic functions for conditional operations
+logicFunctions :: [FormulaFunction]
+logicFunctions =
+  [ FormulaFunction "IF" "IF(condition, true_val, false_val)" "Conditional evaluation" "Logic",
     FormulaFunction "AND" "AND(cond1, cond2, ...)" "Returns TRUE if all are true" "Logic",
     FormulaFunction "OR" "OR(cond1, cond2, ...)" "Returns TRUE if any is true" "Logic",
     FormulaFunction "NOT" "NOT(condition)" "Reverses logical value" "Logic",
     FormulaFunction "IFERROR" "IFERROR(value, error_val)" "Returns error_val if value is error" "Logic",
     FormulaFunction "ISBLANK" "ISBLANK(cell)" "Returns TRUE if cell is empty" "Logic",
-    FormulaFunction "ISNUMBER" "ISNUMBER(value)" "Returns TRUE if value is number" "Logic",
-    -- Text functions
-    FormulaFunction "CONCAT" "CONCAT(text1, text2, ...)" "Joins text strings" "Text",
+    FormulaFunction "ISNUMBER" "ISNUMBER(value)" "Returns TRUE if value is number" "Logic"
+  ]
+
+-- | Text functions for string manipulation
+textFunctions :: [FormulaFunction]
+textFunctions =
+  [ FormulaFunction "CONCAT" "CONCAT(text1, text2, ...)" "Joins text strings" "Text",
     FormulaFunction "LEFT" "LEFT(text, num_chars)" "Returns leftmost characters" "Text",
     FormulaFunction "RIGHT" "RIGHT(text, num_chars)" "Returns rightmost characters" "Text",
     FormulaFunction "MID" "MID(text, start, num_chars)" "Returns substring" "Text",
@@ -352,19 +393,36 @@ formulaFunctions =
     FormulaFunction "UPPER" "UPPER(text)" "Converts to uppercase" "Text",
     FormulaFunction "LOWER" "LOWER(text)" "Converts to lowercase" "Text",
     FormulaFunction "TRIM" "TRIM(text)" "Removes extra spaces" "Text",
-    FormulaFunction "TEXT" "TEXT(value, format)" "Formats number as text" "Text",
-    -- Lookup functions
-    FormulaFunction "VLOOKUP" "VLOOKUP(key, range, col, exact)" "Vertical lookup" "Lookup",
+    FormulaFunction "TEXT" "TEXT(value, format)" "Formats number as text" "Text"
+  ]
+
+-- | Lookup functions for finding values in ranges
+lookupFunctions :: [FormulaFunction]
+lookupFunctions =
+  [ FormulaFunction "VLOOKUP" "VLOOKUP(key, range, col, exact)" "Vertical lookup" "Lookup",
     FormulaFunction "HLOOKUP" "HLOOKUP(key, range, row, exact)" "Horizontal lookup" "Lookup",
     FormulaFunction "INDEX" "INDEX(range, row, col)" "Returns value at position" "Lookup",
-    FormulaFunction "MATCH" "MATCH(value, range, type)" "Returns position of value" "Lookup",
-    -- Date functions
-    FormulaFunction "TODAY" "TODAY()" "Returns current date" "Date",
+    FormulaFunction "MATCH" "MATCH(value, range, type)" "Returns position of value" "Lookup"
+  ]
+
+-- | Date functions for date/time operations
+dateFunctions :: [FormulaFunction]
+dateFunctions =
+  [ FormulaFunction "TODAY" "TODAY()" "Returns current date" "Date",
     FormulaFunction "NOW" "NOW()" "Returns current date and time" "Date",
     FormulaFunction "YEAR" "YEAR(date)" "Extracts year from date" "Date",
     FormulaFunction "MONTH" "MONTH(date)" "Extracts month from date" "Date",
     FormulaFunction "DAY" "DAY(date)" "Extracts day from date" "Date"
   ]
+
+-- | All supported formula functions, combined using Semigroup
+formulaFunctions :: [FormulaFunction]
+formulaFunctions =
+  mathFunctions
+    <> logicFunctions
+    <> textFunctions
+    <> lookupFunctions
+    <> dateFunctions
 
 getAutocompleteSuggestions :: Text -> Grid -> Int -> Int -> [Suggestion]
 getAutocompleteSuggestions input grid maxRows maxCols =
@@ -373,12 +431,11 @@ getAutocompleteSuggestions input grid maxRows maxCols =
       getSuggestionsForToken (getLastToken rest) grid maxRows maxCols
     _ -> []
 
+-- | Extract the last token from input using point-free composition
 getLastToken :: Text -> Text
-getLastToken input =
-  let delimiters = "(),+-*/^&=<>: "
-      reversed = T.reverse input
-      token = T.takeWhile (`notElem` T.unpack delimiters) reversed
-   in T.reverse token
+getLastToken = T.reverse . T.takeWhile (not . isDelimiter) . T.reverse
+  where
+    isDelimiter c = c `elem` ("(),+-*/^&=<>: " :: String)
 
 getSuggestionsForToken :: Text -> Grid -> Int -> Int -> [Suggestion]
 getSuggestionsForToken token grid maxRows maxCols
@@ -443,20 +500,11 @@ extractCellRefs = concatMap parseToken . tokenize . T.toUpper
           delims = "(),+-*/^&=<> "
        in filter (not . T.null) $ T.split (`elem` delims) t
 
+    -- Use Attoparsec to parse tokens as ranges or single coords
     parseToken :: Text -> [Coord]
-    parseToken token
-      | T.isInfixOf ":" token =
-          case T.splitOn ":" token of
-            [start, end] -> expandRange start end
-            _ -> []
-      | otherwise = maybeToList (refToCoord token)
-
-    expandRange :: Text -> Text -> [Coord]
-    expandRange start end =
-      case (refToCoord start, refToCoord end) of
-        (Just (Coord (Row r1) (Col c1)), Just (Coord (Row r2) (Col c2))) ->
-          [Coord (Row r) (Col c) | r <- [min r1 r2 .. max r1 r2], c <- [min c1 c2 .. max c1 c2]]
-        _ -> []
+    parseToken token = case A.parseOnly (rangeP <* A.endOfInput) token of
+      Right coords -> coords
+      Left _ -> maybeToList (refToCoord token)
 
 -- | Find all cells that depend on a given coordinate (directly or indirectly)
 -- Uses Set for visited tracking to prevent infinite loops on circular references
@@ -474,11 +522,11 @@ findDependentCells changedCoord grid = go Set.empty [changedCoord]
 -- | Find cells that directly reference the given coordinate
 findDirectDependents :: Coord -> Grid -> [Coord]
 findDirectDependents targetCoord grid =
-  [ coord
-  | (coord, cell) <- Map.toList grid,
-    coord /= targetCoord,
-    maybe False (elem targetCoord . extractCellRefs) (cellFormula cell)
-  ]
+  Map.keys $ Map.filterWithKey isDependent grid
+  where
+    isDependent coord cell =
+      coord /= targetCoord
+        && maybe False (elem targetCoord . extractCellRefs) (cellFormula cell)
 
 -- | Format a number for display, showing integers without decimal places
 showNumber :: Double -> String

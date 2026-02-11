@@ -37,16 +37,17 @@ data Config = Config
     configStats :: StatsConfig,
     configGrid :: GridConfig
   }
-  deriving (Show, Eq, Generic)
+  deriving stock (Show, Eq, Generic)
 
 data ServerConfig = ServerConfig
   { serverHost :: Text,
-    serverPort :: Int
+    serverPort :: Int,
+    serverDebug :: Bool
   }
-  deriving (Show, Eq, Generic)
+  deriving stock (Show, Eq, Generic)
 
 data LlmProvider = Ollama | OpenAI | Anthropic
-  deriving (Show, Eq, Generic)
+  deriving stock (Show, Eq, Generic)
 
 data LlmConfig = LlmConfig
   { llmProvider :: LlmProvider,
@@ -55,19 +56,19 @@ data LlmConfig = LlmConfig
     llmModel :: Text,
     llmTemperature :: Double
   }
-  deriving (Show, Eq, Generic)
+  deriving stock (Show, Eq, Generic)
 
 data StatsConfig = StatsConfig
   { statsTokensPerOp :: Int,
     statsCostPerOp :: Double
   }
-  deriving (Show, Eq, Generic)
+  deriving stock (Show, Eq, Generic)
 
 data GridConfig = GridConfig
   { gridDefaultRows :: Int,
     gridDefaultCols :: Int
   }
-  deriving (Show, Eq, Generic)
+  deriving stock (Show, Eq, Generic)
 
 defaultConfig :: Config
 defaultConfig =
@@ -75,7 +76,8 @@ defaultConfig =
     { configServer =
         ServerConfig
           { serverHost = "localhost",
-            serverPort = 8080
+            serverPort = 8080,
+            serverDebug = False
           },
       configLlm =
         LlmConfig
@@ -102,6 +104,7 @@ serverCodec =
   ServerConfig
     <$> Toml.text "host" .= serverHost
     <*> Toml.int "port" .= serverPort
+    <*> Toml.bool "debug" .= serverDebug
 
 providerCodec :: Toml.Key -> TomlCodec LlmProvider
 providerCodec = Toml.textBy fromProvider toProvider
@@ -146,17 +149,36 @@ configCodec =
     <*> Toml.table statsCodec "stats" .= configStats
     <*> Toml.table gridCodec "grid" .= configGrid
 
+-- | Validate server configuration
+validateServerConfig :: ServerConfig -> Either ConfigError ()
+validateServerConfig ServerConfig {..} =
+  when (serverPort < 1 || serverPort > 65535) $
+    Left $
+      ConfigValidationError "Port must be between 1 and 65535"
+
+-- | Validate LLM configuration
+validateLlmConfig :: LlmConfig -> Either ConfigError ()
+validateLlmConfig LlmConfig {..} = do
+  when (llmTemperature < 0 || llmTemperature > 2) $
+    Left $
+      ConfigValidationError "Temperature must be between 0 and 2"
+  when (llmProvider /= Ollama && isNothing llmApiKey) $
+    Left $
+      ConfigValidationError "API key required for OpenAI/Anthropic"
+
+-- | Validate grid configuration
+validateGridConfig :: GridConfig -> Either ConfigError ()
+validateGridConfig GridConfig {..} =
+  when (gridDefaultRows < 1 || gridDefaultCols < 1) $
+    Left $
+      ConfigValidationError "Grid dimensions must be positive"
+
 -- | Validate config values at load time to catch errors early
 validateConfig :: Config -> Either ConfigError Config
 validateConfig cfg@Config {..} = do
-  when (serverPort configServer < 1 || serverPort configServer > 65535) $
-    Left $ ConfigValidationError "Port must be between 1 and 65535"
-  when (llmTemperature configLlm < 0 || llmTemperature configLlm > 2) $
-    Left $ ConfigValidationError "Temperature must be between 0 and 2"
-  when (llmProvider configLlm /= Ollama && isNothing (llmApiKey configLlm)) $
-    Left $ ConfigValidationError "API key required for OpenAI/Anthropic"
-  when (gridDefaultRows configGrid < 1 || gridDefaultCols configGrid < 1) $
-    Left $ ConfigValidationError "Grid dimensions must be positive"
+  validateServerConfig configServer
+  validateLlmConfig configLlm
+  validateGridConfig configGrid
   pure cfg
 
 loadConfig :: FilePath -> IO (Either ConfigError Config)
