@@ -1,9 +1,16 @@
 module Spreadsheet
-  ( -- * Types
+  ( -- * Coordinate Types
+    Row (..),
+    Col (..),
+    Coord (..),
+    mkRow,
+    mkCol,
+    mkCoord,
+
+    -- * Cell Types
     Cell (..),
     CellValue (..),
     Grid,
-    Coord,
     Stats (..),
 
     -- * Cell Constructors
@@ -51,7 +58,9 @@ module Spreadsheet
 where
 
 import Clonad
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON (..), FromJSONKey (..), FromJSONKeyFunction (..), ToJSON (..), ToJSONKey (..), ToJSONKeyFunction (..))
+import Data.Aeson.Encoding qualified as E
+import Data.Aeson.Key qualified as Key
 import Data.Char (isAsciiUpper, isDigit, ord)
 import Data.List (unfoldr)
 import Data.Map.Strict (Map)
@@ -63,7 +72,62 @@ import Data.Text qualified as T
 import Data.Text.Read qualified as TR
 import GHC.Generics (Generic)
 
-type Coord = (Int, Int) -- (row, col), 1-indexed
+-- | A 1-indexed row number in the spreadsheet
+newtype Row = Row {unRow :: Int}
+  deriving stock (Show, Eq, Ord, Generic)
+  deriving newtype (Enum)
+  deriving anyclass (ToJSON, FromJSON)
+
+-- | A 1-indexed column number in the spreadsheet
+newtype Col = Col {unCol :: Int}
+  deriving stock (Show, Eq, Ord, Generic)
+  deriving newtype (Enum)
+  deriving anyclass (ToJSON, FromJSON)
+
+-- | A cell coordinate combining Row and Col
+data Coord = Coord
+  { coordRow :: !Row,
+    coordCol :: !Col
+  }
+  deriving stock (Show, Eq, Ord, Generic)
+  deriving anyclass (ToJSON, FromJSON)
+
+-- | Smart constructor for Row (must be >= 1)
+mkRow :: Int -> Maybe Row
+mkRow n
+  | n >= 1 = Just (Row n)
+  | otherwise = Nothing
+
+-- | Smart constructor for Col (must be >= 1)
+mkCol :: Int -> Maybe Col
+mkCol n
+  | n >= 1 = Just (Col n)
+  | otherwise = Nothing
+
+-- | Smart constructor for Coord with validation
+mkCoord :: Int -> Int -> Maybe Coord
+mkCoord r c = Coord <$> mkRow r <*> mkCol c
+
+-- JSON key instances for Map Coord usage
+instance ToJSONKey Coord where
+  toJSONKey = ToJSONKeyText (Key.fromText . render) (E.text . render)
+    where
+      render (Coord (Row r) (Col c)) = T.pack (show r <> "," <> show c)
+
+instance FromJSONKey Coord where
+  fromJSONKey = FromJSONKeyTextParser $ \t ->
+    case T.splitOn "," t of
+      [rText, cText] -> do
+        r <- parseIntText rText
+        c <- parseIntText cText
+        case mkCoord r c of
+          Just coord -> pure coord
+          Nothing -> fail "Coordinates must be >= 1"
+      _ -> fail "Expected 'row,col' format"
+    where
+      parseIntText txt = case TR.decimal txt of
+        Right (n, "") -> pure n
+        _ -> fail $ "Invalid integer: " <> T.unpack txt
 
 data CellValue
   = CellEmpty
@@ -76,8 +140,8 @@ data CellValue
 
 data Cell = Cell
   { cellValue :: !CellValue,
-    cellFormula :: !(Maybe Text), -- Raw formula if this is a formula cell
-    cellDisplay :: !Text -- What to show in the UI
+    cellFormula :: !(Maybe Text),
+    cellDisplay :: !Text
   }
   deriving stock (Show, Eq, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -122,12 +186,13 @@ gridToList = Map.toList
 gridFromList :: [(Coord, Cell)] -> Grid
 gridFromList = Map.fromList
 
--- Convert (1, 1) to "A1", (1, 2) to "B1", etc.
+-- | Convert Coord to spreadsheet reference (e.g., Coord 1 1 -> "A1")
 coordToRef :: Coord -> Text
-coordToRef (row, col) = colToLetter col <> T.pack (show row)
+coordToRef (Coord (Row row) col) = colToLetter col <> T.pack (show row)
 
-colToLetter :: Int -> Text
-colToLetter n
+-- | Convert column number to letter(s) (e.g., 1 -> "A", 27 -> "AA")
+colToLetter :: Col -> Text
+colToLetter (Col n)
   | n <= 0 = T.empty
   | otherwise = T.pack . reverse $ unfoldr step n
   where
@@ -136,30 +201,29 @@ colToLetter n
       let (q, r) = (c - 1) `divMod` 26
        in Just (toEnum (ord 'A' + r), q)
 
--- Convert "A1" to (1, 1), "B2" to (2, 2), etc.
+-- | Parse spreadsheet reference to Coord (e.g., "A1" -> Just (Coord 1 1))
 refToCoord :: Text -> Maybe Coord
-refToCoord ref = (,) <$> parseRow digits <*> parseCol letters
+refToCoord ref = Coord <$> parseRow digits <*> parseCol letters
   where
     (letters, digits) = T.span (not . isDigit) ref
 
-    parseCol :: Text -> Maybe Int
+    parseCol :: Text -> Maybe Col
     parseCol t
       | T.null t = Nothing
-      | otherwise = Just $ T.foldl' (\acc c -> acc * 26 + (ord c - ord 'A' + 1)) 0 (T.toUpper t)
+      | otherwise = Just . Col $ T.foldl' (\acc c -> acc * 26 + (ord c - ord 'A' + 1)) 0 (T.toUpper t)
 
-    parseRow :: Text -> Maybe Int
+    parseRow :: Text -> Maybe Row
     parseRow t = case TR.decimal t of
-      Right (n, rest) | T.null rest && n > 0 -> Just n
+      Right (n, rest) | T.null rest && n > 0 -> Just (Row n)
       _ -> Nothing
 
 isFormula :: Text -> Bool
 isFormula t = T.isPrefixOf "=" (T.strip t)
 
--- The cursed part: Claude evaluates spreadsheet formulas
+-- | Evaluate a formula using the LLM
 evaluateFormula :: Text -> Grid -> Clonad CellValue
 evaluateFormula formulaText grid = do
   let formula = T.strip formulaText
-      -- Build a clearer context: substitute values directly into explanation
       refs = extractCellRefs formula
       nonEmpty = mapMaybe (\coord -> (coordToRef coord,) <$> getCellNumericValue coord grid) refs
       valuesText =
@@ -208,15 +272,16 @@ gridContext grid
       CellBoolean b -> Just $ if b then "TRUE" else "FALSE"
       _ -> Nothing
 
--- Exported version of gridContext for debugging
+-- | Exported version of gridContext for debugging
 gridContextText :: Grid -> Text
 gridContextText = gridContext
 
+-- | Parse LLM result text into a CellValue
 parseResult :: Text -> CellValue
 parseResult t
   | T.null stripped = CellEmpty
-  | "ERROR:" `T.isPrefixOf` upper || "ERROR " `T.isPrefixOf` upper =
-      CellError (T.strip $ T.drop 6 stripped)
+  | Just errMsg <- T.stripPrefix "ERROR:" stripped = CellError (T.strip errMsg)
+  | Just errMsg <- T.stripPrefix "ERROR " stripped = CellError (T.strip errMsg)
   | upper == "TRUE" = CellBoolean True
   | upper == "FALSE" = CellBoolean False
   | Right (n, rest) <- TR.double stripped, T.null rest = CellNumber n
@@ -360,15 +425,15 @@ getNonEmptyCellRefs grid =
 
 generateCellRefs :: Int -> Int -> [Text]
 generateCellRefs maxRows maxCols =
-  [coordToRef (row, col) | row <- [1 .. maxRows], col <- [1 .. maxCols]]
+  [coordToRef (Coord (Row row) (Col col)) | row <- [1 .. maxRows], col <- [1 .. maxCols]]
 
 cellToSuggestion :: Text -> Suggestion
 cellToSuggestion ref = mkSuggestion ref ref "Cell reference" SuggestionCell ref
 
 -- Dependency tracking
 
--- Extract all cell references from a formula text (e.g., "=A1+B2" -> [(1,1), (2,2)])
--- Also expands ranges like A1:A3 -> [A1, A2, A3]
+-- | Extract all cell references from a formula text
+-- Handles both single refs (A1) and ranges (A1:A3)
 extractCellRefs :: Text -> [Coord]
 extractCellRefs = concatMap parseToken . tokenize . T.toUpper
   where
@@ -381,7 +446,6 @@ extractCellRefs = concatMap parseToken . tokenize . T.toUpper
     parseToken :: Text -> [Coord]
     parseToken token
       | T.isInfixOf ":" token =
-          -- Range like A1:A3
           case T.splitOn ":" token of
             [start, end] -> expandRange start end
             _ -> []
@@ -390,11 +454,11 @@ extractCellRefs = concatMap parseToken . tokenize . T.toUpper
     expandRange :: Text -> Text -> [Coord]
     expandRange start end =
       case (refToCoord start, refToCoord end) of
-        (Just (r1, c1), Just (r2, c2)) ->
-          [(r, c) | r <- [min r1 r2 .. max r1 r2], c <- [min c1 c2 .. max c1 c2]]
+        (Just (Coord (Row r1) (Col c1)), Just (Coord (Row r2) (Col c2))) ->
+          [Coord (Row r) (Col c) | r <- [min r1 r2 .. max r1 r2], c <- [min c1 c2 .. max c1 c2]]
         _ -> []
 
--- Find all cells that depend on a given coordinate (directly or indirectly)
+-- | Find all cells that depend on a given coordinate (directly or indirectly)
 -- Uses Set for visited tracking to prevent infinite loops on circular references
 findDependentCells :: Coord -> Grid -> [Coord]
 findDependentCells changedCoord grid = go Set.empty [changedCoord]
@@ -407,7 +471,7 @@ findDependentCells changedCoord grid = go Set.empty [changedCoord]
               newDeps = filter (`Set.notMember` visited) directDeps
            in directDeps ++ go (Set.insert c visited) (newDeps ++ cs)
 
--- Find cells that directly reference the given coordinate
+-- | Find cells that directly reference the given coordinate
 findDirectDependents :: Coord -> Grid -> [Coord]
 findDirectDependents targetCoord grid =
   [ coord

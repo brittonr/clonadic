@@ -24,6 +24,7 @@ library
     DeriveAnyClass
     LambdaCase
     StrictData
+    GeneralizedNewtypeDeriving
   build-depends:
       base           >= 4.14  && < 5
     , aeson          >= 2.0   && < 2.3
@@ -45,7 +46,9 @@ executable clonadic
     TupleSections
     DerivingStrategies
     DeriveAnyClass
+    DeriveGeneric
     StrictData
+    GeneralizedNewtypeDeriving
   build-depends:
       base           >= 4.14  && < 5
     , aeson          >= 2.0   && < 2.3

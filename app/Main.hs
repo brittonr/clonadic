@@ -15,8 +15,8 @@ import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
-import Data.Text.Lazy qualified as TL
 import Data.Text.Read qualified as TR
+import GHC.Generics (Generic)
 import Network.HTTP.Types.Status (status400)
 import Network.Wai.Middleware.RequestLogger (logStdoutDev)
 import Network.Wai.Middleware.Static (addBase, staticPolicy)
@@ -26,16 +26,18 @@ import Web.Scotty
 -- | Structured API error type for consistent error responses
 data ApiError
   = InvalidJsonBody
-  | MissingParam !TL.Text
-  | InvalidParam !TL.Text !String
-  deriving stock (Show)
+  | MissingParam !Text
+  | InvalidParam !Text !String
+  | InvalidCoordinate !Int !Int
+  deriving stock (Show, Generic)
 
 -- | Render API error as user-facing message
 apiErrorMessage :: ApiError -> Text
 apiErrorMessage = \case
   InvalidJsonBody -> "Invalid JSON body"
-  MissingParam name -> "Missing parameter: " <> TL.toStrict name
-  InvalidParam name msg -> "Invalid parameter '" <> TL.toStrict name <> "': " <> T.pack msg
+  MissingParam name -> "Missing parameter: " <> name
+  InvalidParam name msg -> "Invalid parameter '" <> name <> "': " <> T.pack msg
+  InvalidCoordinate r c -> "Invalid coordinate: row=" <> T.pack (show r) <> ", col=" <> T.pack (show c)
 
 -- | Raise an API error with consistent JSON response format
 raiseApiError :: ApiError -> ActionM a
@@ -71,9 +73,9 @@ data AppState = AppState
   }
 
 readAppState :: AppState -> IO (Grid, Stats)
-readAppState AppState {..} = (,) <$> readTVarIO appGrid <*> readTVarIO appStats
+readAppState AppState {..} = atomically $ (,) <$> readTVar appGrid <*> readTVar appStats
 
--- Create ClonadEnv from config
+-- | Create ClonadEnv from config with validation
 mkClonadEnvFromConfig :: LlmConfig -> ClonadEnv
 mkClonadEnvFromConfig LlmConfig {..} = case llmProvider of
   Ollama -> mkOllamaEnv baseUrl modelId
@@ -105,38 +107,30 @@ main = do
     middleware logStdoutDev
     middleware $ staticPolicy (addBase "static")
 
-    -- Serve the main page
-    get "/" $ do
-      file "static/index.html"
+    get "/" $ file "static/index.html"
 
-    -- Get the current grid state
     get "/api/grid" $ do
       (grid, stats) <- liftIO $ readAppState state
-      json $
-        object
-          [ "cells" .= gridToJson grid,
-            "stats" .= stats
-          ]
+      json $ object ["cells" .= gridToJson grid, "stats" .= stats]
 
-    -- Update a cell
     post "/api/cell" $ do
       row <- jsonParam "row"
       col <- jsonParam "col"
       value <- jsonParam "value"
-      result <- liftIO $ updateCell state (row, col) value
-      json result
+      case mkCoord row col of
+        Nothing -> raiseApiError (InvalidCoordinate row col)
+        Just coord -> do
+          result <- liftIO $ updateCell state coord value
+          json result
 
-    -- Recalculate all formulas (the API call storm)
     post "/api/recalculate" $ do
       result <- liftIO $ recalculateAll state
       json result
 
-    -- Get stats
     get "/api/stats" $ do
       stats <- liftIO $ readTVarIO (appStats state)
       json stats
 
-    -- Autocomplete endpoint
     get "/api/autocomplete" $ do
       input <- fromMaybe "" <$> queryParamMaybe "input"
       grid <- liftIO $ readTVarIO (appGrid state)
@@ -144,7 +138,7 @@ main = do
           suggestions = getAutocompleteSuggestions input grid (gridDefaultRows gridCfg) (gridDefaultCols gridCfg)
       json $ object ["suggestions" .= suggestions]
 
-jsonParam :: (Aeson.FromJSON a) => TL.Text -> ActionM a
+jsonParam :: (Aeson.FromJSON a) => Text -> ActionM a
 jsonParam name = do
   b <- body
   case Aeson.decode b of
@@ -154,17 +148,17 @@ jsonParam name = do
       Just (Aeson.Error msg) -> raiseApiError (InvalidParam name msg)
       Just (Aeson.Success val) -> pure val
   where
-    lookupAndParse :: (Aeson.FromJSON a) => TL.Text -> Aeson.Value -> Maybe (Aeson.Result a)
+    lookupAndParse :: (Aeson.FromJSON a) => Text -> Aeson.Value -> Maybe (Aeson.Result a)
     lookupAndParse k (Aeson.Object o) =
-      Aeson.fromJSON <$> KM.lookup (Key.fromString $ TL.unpack k) o
+      Aeson.fromJSON <$> KM.lookup (Key.fromText k) o
     lookupAndParse _ _ = Nothing
 
 gridToJson :: Grid -> Aeson.Value
 gridToJson grid =
   Aeson.Object $
     KM.fromList
-      [ (Key.fromString $ show row <> "," <> show col, cellToJson cell)
-      | ((row, col), cell) <- Map.toList grid
+      [ (Key.fromString $ show (unRow row) <> "," <> show (unCol col), cellToJson cell)
+      | (Coord row col, cell) <- Map.toList grid
       ]
 
 cellToJson :: Cell -> Aeson.Value
@@ -177,8 +171,8 @@ cellToJson Cell {..} =
 
 data CellInput
   = ClearCell
-  | FormulaInput Text
-  | LiteralInput Text
+  | FormulaInput !Text
+  | LiteralInput !Text
 
 classifyCellInput :: Text -> CellInput
 classifyCellInput t
@@ -198,46 +192,39 @@ handleClearCell AppState {..} coord = do
   atomically $ modifyTVar' appGrid (Map.delete coord)
   recalculateDependents appEnv appGrid appStats appConfig coord
   (grid, stats) <- readAppState AppState {..}
-  pure $ mkCellResponse (Cell CellEmpty Nothing "") grid stats
+  pure $ mkCellResponse emptyCell grid stats
 
 handleFormulaCell :: AppState -> Coord -> Text -> IO Aeson.Value
-handleFormulaCell AppState {..} coord formula = do
+handleFormulaCell state@AppState {..} coord formula = do
   grid <- readTVarIO appGrid
   logFormulaEvaluation formula grid
-  result <- runClonad appEnv $ withTemperature 0.0 $ evaluateFormula formula grid
+  newCell <- evaluateAndBuildCell appEnv formula grid
   debugLogT "--- LLM RESPONSE ---"
-  debugLogT $ "Result: " <> T.pack (show result)
+  debugLogT $ "Result: " <> T.pack (show (cellValue newCell))
   debugLogT "==========================================="
-  debugLogT ""
-  let displayText = cellValueToDisplay result
-      newCell =
-        Cell
-          { cellValue = result,
-            cellFormula = Just formula,
-            cellDisplay = displayText
-          }
-      statsCfg = configStats appConfig
-  updateGridAndStats appGrid appStats statsCfg coord newCell
+  updateGridAndStats appGrid appStats (configStats appConfig) coord newCell
   recalculateDependents appEnv appGrid appStats appConfig coord
-  (updatedGrid, stats) <- readAppState AppState {..}
+  (updatedGrid, stats) <- readAppState state
   pure $ mkCellResponse newCell updatedGrid stats
 
 handleLiteralCell :: AppState -> Coord -> Text -> IO Aeson.Value
-handleLiteralCell AppState {..} coord value = do
+handleLiteralCell state@AppState {..} coord value = do
   let cellVal = case TR.double value of
         Right (n, rest) | T.null rest -> CellNumber n
         _ -> CellText value
-      displayText = cellValueToDisplay cellVal
-      newCell =
-        Cell
-          { cellValue = cellVal,
-            cellFormula = Nothing,
-            cellDisplay = displayText
-          }
+      newCell = mkLiteralCell cellVal (cellValueToDisplay cellVal)
   atomically $ modifyTVar' appGrid (Map.insert coord newCell)
   recalculateDependents appEnv appGrid appStats appConfig coord
-  (updatedGrid, stats) <- readAppState AppState {..}
+  (updatedGrid, stats) <- readAppState state
   pure $ mkCellResponse newCell updatedGrid stats
+
+-- | Unified formula evaluation and cell construction
+-- Consolidates the repeated pattern across handlers
+evaluateAndBuildCell :: ClonadEnv -> Text -> Grid -> IO Cell
+evaluateAndBuildCell env formula grid = do
+  result <- runClonad env $ withTemperature 0.0 $ evaluateFormula formula grid
+  let displayText = cellValueToDisplay result
+  pure $ mkFormulaCell formula result displayText
 
 logFormulaEvaluation :: Text -> Grid -> IO ()
 logFormulaEvaluation formula grid = do
@@ -256,13 +243,11 @@ logFormulaEvaluation formula grid = do
   debugLogT "System: You are a spreadsheet formula engine. Evaluate the given formula."
   debugLogT "        Cell values are provided as context. Return ONLY the numeric result."
   debugLogT "        If the formula is invalid or references empty cells, return 'ERROR: <reason>'."
-  debugLogT "        Do not explain. Just the number or error."
   debugLogT ""
   debugLogT $ "Input tuple: (\"" <> formula <> "\", \"" <> ctx <> "\")"
   debugLogT "--- END PROMPT ---"
-  debugLogT ""
 
--- Recalculate all cells that depend on the changed cell
+-- | Recalculate all cells that depend on the changed cell
 recalculateDependents :: ClonadEnv -> TVar Grid -> TVar Stats -> Config -> Coord -> IO ()
 recalculateDependents env gridVar statsVar cfg changedCoord = do
   grid <- readTVarIO gridVar
@@ -278,9 +263,11 @@ recalculateCell :: ClonadEnv -> TVar Grid -> TVar Stats -> Config -> Coord -> IO
 recalculateCell env gridVar statsVar cfg coord = do
   grid <- readTVarIO gridVar
   case Map.lookup coord grid of
-    Nothing -> debugLogT $ "  Cell " <> T.pack (show coord) <> " not found in grid"
+    Nothing ->
+      debugLogT $ "  Cell " <> T.pack (show coord) <> " not found in grid"
     Just cell -> case cellFormula cell of
-      Nothing -> debugLogT $ "  Cell " <> T.pack (show coord) <> " has no formula"
+      Nothing ->
+        debugLogT $ "  Cell " <> T.pack (show coord) <> " has no formula"
       Just formula -> do
         debugLogT ""
         debugLogT $ "========== RECALCULATING " <> T.pack (show coord) <> " =========="
@@ -291,19 +278,17 @@ recalculateCell env gridVar statsVar cfg coord = do
           forM_ refs $ \refCoord -> do
             let refCell = getCell refCoord grid
             debugLogT $ "  " <> T.pack (show refCoord) <> " -> " <> cellDisplay refCell
-        let ctx = gridContextText grid
         debugLogT ""
         debugLogT "--- PROMPT TO LLM ---"
-        debugLogT $ "Input: (\"" <> formula <> "\", \"" <> ctx <> "\")"
+        debugLogT $ "Input: (\"" <> formula <> "\", \"" <> gridContextText grid <> "\")"
         debugLogT "--- END PROMPT ---"
-        result <- runClonad env $ withTemperature 0.0 $ evaluateFormula formula grid
-        let displayText = cellValueToDisplay result
-            newCell = cell {cellValue = result, cellDisplay = displayText}
-            statsCfg = configStats cfg
+        newCell <- evaluateAndBuildCell env formula grid
+        -- Preserve original formula when updating
+        let updatedCell = newCell {cellFormula = Just formula}
         debugLogT "--- LLM RESPONSE ---"
-        debugLogT $ "Result: " <> displayText
+        debugLogT $ "Result: " <> cellDisplay updatedCell
         debugLogT "==========================================="
-        updateGridAndStats gridVar statsVar statsCfg coord newCell
+        updateGridAndStats gridVar statsVar (configStats cfg) coord updatedCell
 
 incrementStats :: StatsConfig -> Stats -> Stats
 incrementStats StatsConfig {..} Stats {..} =
@@ -329,7 +314,7 @@ debugEnabled = False
 debugLogT :: Text -> IO ()
 debugLogT msg = when debugEnabled $ TIO.putStrLn msg
 
--- STM helper for common grid+stats update pattern
+-- | STM helper for atomic grid+stats update
 updateGridAndStats :: TVar Grid -> TVar Stats -> StatsConfig -> Coord -> Cell -> IO ()
 updateGridAndStats gridVar statsVar statsCfg coord cell =
   atomically $ do
@@ -341,7 +326,6 @@ recalculateAll AppState {..} = do
   grid <- readTVarIO appGrid
   let formulaCells = Map.toList $ Map.filter (isJust . cellFormula) grid
 
-  -- Evaluate each formula cell (the API call storm)
   newGrid <- foldM (recalcCell appEnv appStats appConfig) grid formulaCells
 
   atomically $ writeTVar appGrid newGrid
@@ -356,13 +340,9 @@ recalculateAll AppState {..} = do
       ]
 
 recalcCell :: ClonadEnv -> TVar Stats -> Config -> Grid -> (Coord, Cell) -> IO Grid
-recalcCell env statsVar cfg grid (coord, cell) = do
-  case cellFormula cell of
-    Nothing -> pure grid
-    Just formula -> do
-      result <- runClonad env $ withTemperature 0.0 $ evaluateFormula formula grid
-      let displayText = cellValueToDisplay result
-          newCell = cell {cellValue = result, cellDisplay = displayText}
-          statsCfg = configStats cfg
-      atomically $ modifyTVar' statsVar (incrementStats statsCfg)
-      pure $ Map.insert coord newCell grid
+recalcCell env statsVar cfg grid (coord, cell) = case cellFormula cell of
+  Nothing -> pure grid
+  Just formula -> do
+    newCell <- evaluateAndBuildCell env formula grid
+    atomically $ modifyTVar' statsVar (incrementStats (configStats cfg))
+    pure $ Map.insert coord newCell grid
