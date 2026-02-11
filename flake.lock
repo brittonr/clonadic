@@ -8,11 +8,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1770762712,
-        "narHash": "sha256-9CT1JxcwmTyr2MQMrgCyqv4hdmn3KSHdVnkZ76SmMbg=",
+        "lastModified": 1770766296,
+        "narHash": "sha256-sw6dLPA6Bx2dukck0ITOD4+d5CSqiiHeDBBXYCKkTng=",
         "owner": "brittonr",
         "repo": "clonad",
-        "rev": "a97021520d7c2cb0be9f863290fa826cec4e0da5",
+        "rev": "a3571ce9a8083ac68ecf168c014486103d659a86",
         "type": "github"
       },
       "original": {
