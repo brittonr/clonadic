@@ -42,18 +42,16 @@ module Spreadsheet
 
     -- * Debug helpers
     gridContextText,
-    evaluateFormulaWithLogging,
   )
 where
 
 import Clonad
 import Data.Aeson (FromJSON, ToJSON)
-import Data.Char (isDigit, ord)
+import Data.Char (isAsciiUpper, isDigit, ord)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
-import Debug.Trace (trace)
 import GHC.Generics (Generic)
 
 type Coord = (Int, Int) -- (row, col), 1-indexed
@@ -101,8 +99,7 @@ emptyGrid :: Grid
 emptyGrid = Map.empty
 
 getCell :: Coord -> Grid -> Cell
-getCell coord grid =
-  Map.findWithDefault (Cell CellEmpty Nothing "") coord grid
+getCell = Map.findWithDefault (Cell CellEmpty Nothing "")
 
 setCell :: Coord -> Cell -> Grid -> Grid
 setCell = Map.insert
@@ -118,11 +115,13 @@ coordToRef :: Coord -> Text
 coordToRef (row, col) = T.pack $ colToLetter col ++ show row
 
 colToLetter :: Int -> String
-colToLetter c
-  | c <= 26 = [toEnum (ord 'A' + c - 1)]
-  | otherwise =
-      let (q, r) = (c - 1) `divMod` 26
-       in colToLetter q ++ [toEnum (ord 'A' + r)]
+colToLetter = go []
+  where
+    go acc c
+      | c <= 0 = acc
+      | otherwise =
+          let (q, r) = (c - 1) `divMod` 26
+           in go (toEnum (ord 'A' + r) : acc) q
 
 -- Convert "A1" to (1, 1), "B2" to (2, 2), etc.
 refToCoord :: Text -> Maybe Coord
@@ -209,70 +208,18 @@ gridContext grid =
 gridContextText :: Grid -> Text
 gridContextText = gridContext
 
--- Version of evaluateFormula that logs the prompt and response
-evaluateFormulaWithLogging :: Text -> Grid -> Clonad CellValue
-evaluateFormulaWithLogging formulaText grid = do
-  let formula = T.strip formulaText
-      refs = extractCellRefs formula
-      cellValues = [(coordToRef coord, getCellNumericValue coord grid) | coord <- refs]
-      nonEmpty = [(ref, v) | (ref, Just v) <- cellValues]
-      valuesText =
-        if null nonEmpty
-          then "All cells are empty (value 0)"
-          else T.intercalate ", " [ref <> "=" <> T.pack (show v) | (ref, v) <- nonEmpty]
-      inputText = formula <> " with " <> valuesText
-      systemPrompt =
-        T.unlines
-          [ "Evaluate this spreadsheet formula. Return ONLY the numeric answer.",
-            "",
-            "Rules:",
-            "- Empty cells = 0",
-            "- SUM adds all values",
-            "- Return just the number, nothing else",
-            "",
-            "Examples:",
-            "=SUM(A1:A3) with A1=1, A2=2, A3=3 -> 6",
-            "=SUM(A1:A3) with A1=5 -> 5",
-            "=2+2 -> 4"
-          ]
-  -- Log the full prompt
-  let _ =
-        trace
-          ( "\n=== LLM PROMPT ===\nSystem: "
-              ++ T.unpack systemPrompt
-              ++ "\nInput: "
-              ++ T.unpack inputText
-              ++ "\n================="
-          )
-          ()
-  result <- clonad @(Text, Text) @Text systemPrompt (inputText, "")
-  -- Log the response
-  let _ = trace ("\n=== LLM RESPONSE ===\n" ++ T.unpack result ++ "\n====================") ()
-  pure $ parseResult result
-  where
-    getCellNumericValue :: Coord -> Grid -> Maybe Double
-    getCellNumericValue coord g = case cellValue (getCell coord g) of
-      CellNumber n -> Just n
-      _ -> Nothing
-
 parseResult :: Text -> CellValue
-parseResult t =
-  let stripped = T.strip t
-      upper = T.toUpper stripped
-   in if T.null stripped
-        then CellEmpty
-        else
-          if "ERROR:" `T.isPrefixOf` upper || "ERROR " `T.isPrefixOf` upper
-            then CellError (T.strip $ T.drop 6 stripped)
-            else
-              if upper == "TRUE"
-                then CellBoolean True
-                else
-                  if upper == "FALSE"
-                    then CellBoolean False
-                    else case reads (T.unpack stripped) of
-                      [(n, "")] -> CellNumber n
-                      _ -> CellText stripped -- Default to text, not error!
+parseResult t
+  | T.null stripped = CellEmpty
+  | "ERROR:" `T.isPrefixOf` upper || "ERROR " `T.isPrefixOf` upper =
+      CellError (T.strip $ T.drop 6 stripped)
+  | upper == "TRUE" = CellBoolean True
+  | upper == "FALSE" = CellBoolean False
+  | [(n, "")] <- reads (T.unpack stripped) = CellNumber n
+  | otherwise = CellText stripped
+  where
+    stripped = T.strip t
+    upper = T.toUpper stripped
 
 -- Autocomplete functionality
 
@@ -385,17 +332,12 @@ getSuggestionsForToken token grid maxRows maxCols
 
 isLikelyColLetter :: Text -> Bool
 isLikelyColLetter t =
-  let upper = T.toUpper t
-   in T.length t <= 2
-        && T.all (\c -> c >= 'A' && c <= 'Z') upper
+  T.length t <= 2 && T.all isAsciiUpper (T.toUpper t)
 
 functionSuggestions :: Text -> [Suggestion]
 functionSuggestions prefix =
   let upper = T.toUpper prefix
-      matches =
-        filter
-          (\f -> T.isPrefixOf upper (funcName f))
-          formulaFunctions
+      matches = filter (T.isPrefixOf upper . funcName) formulaFunctions
    in map functionToSuggestion (take 8 matches)
 
 functionToSuggestion :: FormulaFunction -> Suggestion

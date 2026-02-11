@@ -8,17 +8,24 @@ module Config
     LlmProvider (..),
     StatsConfig (..),
     GridConfig (..),
+    ConfigError (..),
     loadConfig,
     defaultConfig,
   )
 where
 
+import Control.Exception (IOException, try)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import GHC.Generics (Generic)
 import Toml (TomlCodec, (.=))
 import Toml qualified
+
+data ConfigError
+  = ConfigParseError Text
+  | ConfigFileError IOException
+  deriving (Show)
 
 data Config = Config
   { configServer :: ServerConfig,
@@ -93,7 +100,7 @@ serverCodec =
     <*> Toml.int "port" .= serverPort
 
 providerCodec :: Toml.Key -> TomlCodec LlmProvider
-providerCodec key = Toml.textBy fromProvider toProvider key
+providerCodec = Toml.textBy fromProvider toProvider
   where
     toProvider :: Text -> Either Text LlmProvider
     toProvider "ollama" = Right Ollama
@@ -135,9 +142,11 @@ configCodec =
     <*> Toml.table statsCodec "stats" .= configStats
     <*> Toml.table gridCodec "grid" .= configGrid
 
-loadConfig :: FilePath -> IO (Either Text Config)
+loadConfig :: FilePath -> IO (Either ConfigError Config)
 loadConfig path = do
-  content <- TIO.readFile path
-  pure $ case Toml.decode configCodec content of
-    Left errs -> Left $ T.pack $ show errs
-    Right cfg -> Right cfg
+  result <- try $ TIO.readFile path
+  case result of
+    Left err -> pure $ Left $ ConfigFileError err
+    Right content -> pure $ case Toml.decode configCodec content of
+      Left errs -> Left $ ConfigParseError $ T.pack $ show errs
+      Right cfg -> Right cfg
