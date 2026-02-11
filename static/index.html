@@ -1007,10 +1007,66 @@
 
   <script>
     const ROWS = 20, COLS = 10, DELIM = '(),+-*/^&=<>: ';
+    const MAX_SUGGESTIONS = 8;
+
+    // Static formula functions - no server calls needed for autocomplete
+    const FORMULA_FUNCTIONS = [
+      // Natural Language patterns
+      { name: 'what is', signature: 'what is...', description: 'Ask a question about data', category: 'Natural Language' },
+      { name: 'sum of', signature: 'sum of A1 to A5', description: 'Calculate sum naturally', category: 'Natural Language' },
+      { name: 'is...greater', signature: 'is A1 greater than B1?', description: 'Compare values', category: 'Natural Language' },
+      { name: 'convert', signature: 'convert A1 from X to Y', description: 'Unit conversion', category: 'Natural Language' },
+      { name: 'is...prime', signature: 'is A1 a prime number?', description: 'Check if prime', category: 'Natural Language' },
+      { name: 'what percent', signature: 'what percent is A1 of B1?', description: 'Calculate percentage', category: 'Natural Language' },
+      // Math functions
+      { name: 'SUM', signature: 'SUM(range)', description: 'Adds all numbers in a range', category: 'Math' },
+      { name: 'AVERAGE', signature: 'AVERAGE(range)', description: 'Returns the average of numbers', category: 'Math' },
+      { name: 'MIN', signature: 'MIN(range)', description: 'Returns the minimum value', category: 'Math' },
+      { name: 'MAX', signature: 'MAX(range)', description: 'Returns the maximum value', category: 'Math' },
+      { name: 'COUNT', signature: 'COUNT(range)', description: 'Counts cells with numbers', category: 'Math' },
+      { name: 'ABS', signature: 'ABS(number)', description: 'Returns absolute value', category: 'Math' },
+      { name: 'ROUND', signature: 'ROUND(number, digits)', description: 'Rounds to specified digits', category: 'Math' },
+      { name: 'FLOOR', signature: 'FLOOR(number)', description: 'Rounds down to nearest integer', category: 'Math' },
+      { name: 'CEILING', signature: 'CEILING(number)', description: 'Rounds up to nearest integer', category: 'Math' },
+      { name: 'SQRT', signature: 'SQRT(number)', description: 'Returns square root', category: 'Math' },
+      { name: 'POWER', signature: 'POWER(base, exponent)', description: 'Returns base raised to power', category: 'Math' },
+      { name: 'MOD', signature: 'MOD(number, divisor)', description: 'Returns remainder after division', category: 'Math' },
+      { name: 'PRODUCT', signature: 'PRODUCT(range)', description: 'Multiplies all numbers in range', category: 'Math' },
+      { name: 'MEDIAN', signature: 'MEDIAN(range)', description: 'Returns the median value', category: 'Math' },
+      // Logic functions
+      { name: 'IF', signature: 'IF(condition, true_val, false_val)', description: 'Conditional evaluation', category: 'Logic' },
+      { name: 'AND', signature: 'AND(cond1, cond2, ...)', description: 'Returns TRUE if all are true', category: 'Logic' },
+      { name: 'OR', signature: 'OR(cond1, cond2, ...)', description: 'Returns TRUE if any is true', category: 'Logic' },
+      { name: 'NOT', signature: 'NOT(condition)', description: 'Reverses logical value', category: 'Logic' },
+      { name: 'IFERROR', signature: 'IFERROR(value, error_val)', description: 'Returns error_val if value is error', category: 'Logic' },
+      { name: 'ISBLANK', signature: 'ISBLANK(cell)', description: 'Returns TRUE if cell is empty', category: 'Logic' },
+      { name: 'ISNUMBER', signature: 'ISNUMBER(value)', description: 'Returns TRUE if value is number', category: 'Logic' },
+      // Text functions
+      { name: 'CONCAT', signature: 'CONCAT(text1, text2, ...)', description: 'Joins text strings', category: 'Text' },
+      { name: 'LEFT', signature: 'LEFT(text, num_chars)', description: 'Returns leftmost characters', category: 'Text' },
+      { name: 'RIGHT', signature: 'RIGHT(text, num_chars)', description: 'Returns rightmost characters', category: 'Text' },
+      { name: 'MID', signature: 'MID(text, start, num_chars)', description: 'Returns substring', category: 'Text' },
+      { name: 'LEN', signature: 'LEN(text)', description: 'Returns length of text', category: 'Text' },
+      { name: 'UPPER', signature: 'UPPER(text)', description: 'Converts to uppercase', category: 'Text' },
+      { name: 'LOWER', signature: 'LOWER(text)', description: 'Converts to lowercase', category: 'Text' },
+      { name: 'TRIM', signature: 'TRIM(text)', description: 'Removes extra spaces', category: 'Text' },
+      { name: 'TEXT', signature: 'TEXT(value, format)', description: 'Formats number as text', category: 'Text' },
+      // Lookup functions
+      { name: 'VLOOKUP', signature: 'VLOOKUP(key, range, col, exact)', description: 'Vertical lookup', category: 'Lookup' },
+      { name: 'HLOOKUP', signature: 'HLOOKUP(key, range, row, exact)', description: 'Horizontal lookup', category: 'Lookup' },
+      { name: 'INDEX', signature: 'INDEX(range, row, col)', description: 'Returns value at position', category: 'Lookup' },
+      { name: 'MATCH', signature: 'MATCH(value, range, type)', description: 'Returns position of value', category: 'Lookup' },
+      // Date functions
+      { name: 'TODAY', signature: 'TODAY()', description: 'Returns current date', category: 'Date' },
+      { name: 'NOW', signature: 'NOW()', description: 'Returns current date and time', category: 'Date' },
+      { name: 'YEAR', signature: 'YEAR(date)', description: 'Extracts year from date', category: 'Date' },
+      { name: 'MONTH', signature: 'MONTH(date)', description: 'Extracts month from date', category: 'Date' },
+      { name: 'DAY', signature: 'DAY(date)', description: 'Extracts day from date', category: 'Date' },
+    ];
 
     let selectedCell = { row: 1, col: 1 }, cells = {}, selectedRange = null;
     let isDragging = false, dragStart = null, dragEnd = null;
-    let autocompleteSelectedIndex = -1, autocompleteSuggestions = [], autocompleteDebounceTimer = null;
+    let autocompleteSelectedIndex = -1, autocompleteSuggestions = [];
     let isInPointMode = false, pointModeRangeStart = null, pointModeNavPosition = null;
     let clipboard = null, isDragToMove = false, dragMoveStart = null;
     let contextMenuCell = null;
@@ -1130,9 +1186,9 @@
         }
         if (e.key === 'Enter') { hideAutocomplete(); submitFormula(); }
       });
-      input.addEventListener('input', () => { clearTimeout(autocompleteDebounceTimer); autocompleteDebounceTimer = setTimeout(() => fetchAutocompleteSuggestions(input.value), 250); });
+      input.addEventListener('input', () => updateAutocompleteSuggestions(input.value));
       input.addEventListener('blur', () => setTimeout(hideAutocomplete, 150));
-      input.addEventListener('focus', () => { if (input.value.startsWith('=')) { clearTimeout(autocompleteDebounceTimer); autocompleteDebounceTimer = setTimeout(() => fetchAutocompleteSuggestions(input.value), 250); } });
+      input.addEventListener('focus', () => { if (input.value.startsWith('=')) updateAutocompleteSuggestions(input.value); });
       document.addEventListener('click', e => { if (!e.target.closest('.autocomplete-container')) hideAutocomplete(); });
     }
 
@@ -1630,19 +1686,64 @@
       return row === selectedCell.row && col === selectedCell.col;
     }
 
-    let autocompleteAbortController = null;
-
-    async function fetchAutocompleteSuggestions(input) {
+    // Client-side autocomplete - no server requests needed
+    function updateAutocompleteSuggestions(input) {
       if (!input.startsWith('=')) { hideAutocomplete(); return; }
-      // Cancel any in-flight request
-      if (autocompleteAbortController) autocompleteAbortController.abort();
-      autocompleteAbortController = new AbortController();
-      try {
-        const data = await (await fetch(`/api/autocomplete?input=${encodeURIComponent(input)}`, { signal: autocompleteAbortController.signal })).json();
-        autocompleteSuggestions = data.suggestions || [];
-        autocompleteSelectedIndex = autocompleteSuggestions.length > 0 ? 0 : -1;
-        renderAutocompleteDropdown();
-      } catch (e) { if (e.name !== 'AbortError') { console.error('Autocomplete error:', e); hideAutocomplete(); } }
+      const token = getLastToken(input.substring(1));
+      autocompleteSuggestions = getSuggestionsForToken(token);
+      autocompleteSelectedIndex = autocompleteSuggestions.length > 0 ? 0 : -1;
+      renderAutocompleteDropdown();
+    }
+
+    function getLastToken(text) {
+      let i = text.length - 1;
+      while (i >= 0 && !DELIM.includes(text[i])) i--;
+      return text.substring(i + 1);
+    }
+
+    function getSuggestionsForToken(token) {
+      if (!token) return getFunctionSuggestions('');
+      const upper = token.toUpperCase();
+      const isColLetter = /^[A-Z]{1,2}$/.test(upper);
+      if (isColLetter) return getCellSuggestions(token);
+      return [...getFunctionSuggestions(token), ...getCellSuggestions(token)].slice(0, MAX_SUGGESTIONS);
+    }
+
+    function getFunctionSuggestions(prefix) {
+      const upper = prefix.toUpperCase();
+      return FORMULA_FUNCTIONS
+        .filter(f => f.name.toUpperCase().startsWith(upper))
+        .slice(0, MAX_SUGGESTIONS)
+        .map(f => ({
+          suggestionText: f.name,
+          suggestionDisplay: f.signature,
+          suggestionDescription: f.description,
+          suggestionType: 'SuggestionFunction',
+          suggestionInsert: f.name + (f.category === 'Natural Language' ? ' ' : '(')
+        }));
+    }
+
+    function getCellSuggestions(prefix) {
+      const upper = prefix.toUpperCase();
+      // Prioritize non-empty cells, then all cells
+      const nonEmpty = Object.keys(cells).map(k => {
+        const [r, c] = k.split(',').map(Number);
+        return colToLetter(c) + r;
+      }).filter(ref => ref.toUpperCase().startsWith(upper));
+      const allRefs = [];
+      for (let r = 1; r <= ROWS; r++) {
+        for (let c = 1; c <= COLS; c++) {
+          const ref = colToLetter(c) + r;
+          if (ref.toUpperCase().startsWith(upper) && !nonEmpty.includes(ref)) allRefs.push(ref);
+        }
+      }
+      return [...nonEmpty, ...allRefs].slice(0, MAX_SUGGESTIONS).map(ref => ({
+        suggestionText: ref,
+        suggestionDisplay: ref,
+        suggestionDescription: 'Cell reference',
+        suggestionType: 'SuggestionCell',
+        suggestionInsert: ref
+      }));
     }
 
     function renderAutocompleteDropdown() {
@@ -1668,7 +1769,7 @@
       const idx = findLastDelim(input.value);
       input.value = (idx === -1 ? '' : input.value.substring(0, idx + 1)) + s.suggestionInsert;
       input.focus(); hideAutocomplete();
-      if (s.suggestionType === 'SuggestionFunction') setTimeout(() => fetchAutocompleteSuggestions(input.value), 50);
+      if (s.suggestionType === 'SuggestionFunction') updateAutocompleteSuggestions(input.value);
     }
 
     function hideAutocomplete() { $('autocomplete-dropdown').classList.remove('active'); autocompleteSelectedIndex = -1; autocompleteSuggestions = []; }
