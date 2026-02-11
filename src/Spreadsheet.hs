@@ -317,13 +317,29 @@ isNaturalLanguage formula =
       wordCount = length $ T.words stripped
    in (hasQuestionWord || wordCount > 4) && not hasTraditionalPattern
 
+-- | Parse Excel-style quoted string literal: ="text" -> Just text
+-- Returns the unquoted content if the formula is a simple quoted string
+parseQuotedLiteral :: Text -> Maybe Text
+parseQuotedLiteral t
+  | T.length stripped >= 2,
+    T.head stripped == '"',
+    T.last stripped == '"' =
+      Just $ T.init $ T.tail stripped
+  | otherwise = Nothing
+  where
+    stripped = T.strip t
+
 -- | Evaluate a formula using the LLM
 evaluateFormula :: Text -> Grid -> Clonad CellValue
 evaluateFormula formulaText grid = do
   let formula = T.drop 1 $ T.strip formulaText -- Remove leading =
-  if isNaturalLanguage formula
-    then evaluateNaturalLanguage formula grid
-    else evaluateTraditionalFormula formulaText grid
+  -- Check for quoted string literal first (Excel-style ="text")
+  case parseQuotedLiteral formula of
+    Just literal -> pure $ CellText literal
+    Nothing ->
+      if isNaturalLanguage formula
+        then evaluateNaturalLanguage formula grid
+        else evaluateTraditionalFormula formulaText grid
 
 -- | Evaluate a natural language request
 evaluateNaturalLanguage :: Text -> Grid -> Clonad CellValue

@@ -1130,9 +1130,9 @@
         }
         if (e.key === 'Enter') { hideAutocomplete(); submitFormula(); }
       });
-      input.addEventListener('input', () => { clearTimeout(autocompleteDebounceTimer); autocompleteDebounceTimer = setTimeout(() => fetchAutocompleteSuggestions(input.value), 100); });
+      input.addEventListener('input', () => { clearTimeout(autocompleteDebounceTimer); autocompleteDebounceTimer = setTimeout(() => fetchAutocompleteSuggestions(input.value), 250); });
       input.addEventListener('blur', () => setTimeout(hideAutocomplete, 150));
-      input.addEventListener('focus', () => { if (input.value.startsWith('=')) fetchAutocompleteSuggestions(input.value); });
+      input.addEventListener('focus', () => { if (input.value.startsWith('=')) { clearTimeout(autocompleteDebounceTimer); autocompleteDebounceTimer = setTimeout(() => fetchAutocompleteSuggestions(input.value), 250); } });
       document.addEventListener('click', e => { if (!e.target.closest('.autocomplete-container')) hideAutocomplete(); });
     }
 
@@ -1630,14 +1630,19 @@
       return row === selectedCell.row && col === selectedCell.col;
     }
 
+    let autocompleteAbortController = null;
+
     async function fetchAutocompleteSuggestions(input) {
       if (!input.startsWith('=')) { hideAutocomplete(); return; }
+      // Cancel any in-flight request
+      if (autocompleteAbortController) autocompleteAbortController.abort();
+      autocompleteAbortController = new AbortController();
       try {
-        const data = await (await fetch(`/api/autocomplete?input=${encodeURIComponent(input)}`)).json();
+        const data = await (await fetch(`/api/autocomplete?input=${encodeURIComponent(input)}`, { signal: autocompleteAbortController.signal })).json();
         autocompleteSuggestions = data.suggestions || [];
         autocompleteSelectedIndex = autocompleteSuggestions.length > 0 ? 0 : -1;
         renderAutocompleteDropdown();
-      } catch (e) { console.error('Autocomplete error:', e); hideAutocomplete(); }
+      } catch (e) { if (e.name !== 'AbortError') { console.error('Autocomplete error:', e); hideAutocomplete(); } }
     }
 
     function renderAutocompleteDropdown() {
