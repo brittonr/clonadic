@@ -87,8 +87,7 @@ main = do
 
     -- Get the current grid state
     get "/api/grid" $ do
-      grid <- liftIO $ readTVarIO (appGrid state)
-      stats <- liftIO $ readTVarIO (appStats state)
+      (grid, stats) <- liftIO $ (,) <$> readTVarIO (appGrid state) <*> readTVarIO (appStats state)
       json $
         object
           [ "cells" .= gridToJson grid,
@@ -115,8 +114,7 @@ main = do
 
     -- Autocomplete endpoint
     get "/api/autocomplete" $ do
-      inputParam <- queryParamMaybe "input"
-      let input = fromMaybe "" inputParam
+      input <- fromMaybe "" <$> queryParamMaybe "input"
       grid <- liftIO $ readTVarIO (appGrid state)
       let gridCfg = configGrid (appConfig state)
           suggestions = getAutocompleteSuggestions input grid (gridDefaultRows gridCfg) (gridDefaultCols gridCfg)
@@ -184,8 +182,7 @@ handleClearCell :: AppState -> Coord -> IO Aeson.Value
 handleClearCell AppState {..} coord = do
   atomically $ modifyTVar' appGrid (Map.delete coord)
   recalculateDependents appEnv appGrid appStats appConfig coord
-  grid <- readTVarIO appGrid
-  stats <- readTVarIO appStats
+  (grid, stats) <- (,) <$> readTVarIO appGrid <*> readTVarIO appStats
   pure $ mkCellResponse (Cell CellEmpty Nothing "") grid stats
 
 handleFormulaCell :: AppState -> Coord -> Text -> IO Aeson.Value
@@ -207,8 +204,7 @@ handleFormulaCell AppState {..} coord formula = do
       statsCfg = configStats appConfig
   updateGridAndStats appGrid appStats statsCfg coord newCell
   recalculateDependents appEnv appGrid appStats appConfig coord
-  updatedGrid <- readTVarIO appGrid
-  stats <- readTVarIO appStats
+  (updatedGrid, stats) <- (,) <$> readTVarIO appGrid <*> readTVarIO appStats
   pure $ mkCellResponse newCell updatedGrid stats
 
 handleLiteralCell :: AppState -> Coord -> Text -> IO Aeson.Value
@@ -225,8 +221,7 @@ handleLiteralCell AppState {..} coord value = do
           }
   atomically $ modifyTVar' appGrid (Map.insert coord newCell)
   recalculateDependents appEnv appGrid appStats appConfig coord
-  updatedGrid <- readTVarIO appGrid
-  stats <- readTVarIO appStats
+  (updatedGrid, stats) <- (,) <$> readTVarIO appGrid <*> readTVarIO appStats
   pure $ mkCellResponse newCell updatedGrid stats
 
 logFormulaEvaluation :: Text -> Grid -> IO ()

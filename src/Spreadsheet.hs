@@ -47,7 +47,7 @@ import Data.Char (isAsciiUpper, isDigit, ord)
 import Data.List (unfoldr)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (maybeToList)
+import Data.Maybe (mapMaybe, maybeToList)
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -151,8 +151,7 @@ evaluateFormula formulaText grid = do
   let formula = T.strip formulaText
       -- Build a clearer context: substitute values directly into explanation
       refs = extractCellRefs formula
-      cellValues = [(coordToRef coord, getCellNumericValue coord grid) | coord <- refs]
-      nonEmpty = [(ref, v) | (ref, Just v) <- cellValues]
+      nonEmpty = mapMaybe (\coord -> (coordToRef coord,) <$> getCellNumericValue coord grid) refs
       valuesText =
         if null nonEmpty
           then "All cells are empty (value 0)"
@@ -183,27 +182,15 @@ evaluateFormula formulaText grid = do
       _ -> Nothing
 
 gridContext :: Grid -> Text
-gridContext grid =
-  let validCells = filter (isValidCell . snd) (Map.toList grid)
-   in if null validCells
-        then "No cells have values yet."
-        else T.intercalate ", " $ map formatCell validCells
+gridContext grid = case mapMaybe formatValidCell (Map.toList grid) of
+  [] -> "No cells have values yet."
+  xs -> T.intercalate ", " xs
   where
-    -- Only include cells with actual values, not errors or empty
-    isValidCell cell = case cellValue cell of
-      CellNumber _ -> True
-      CellText _ -> True
-      CellBoolean _ -> True
-      _ -> False
-
-    formatCell (coord, cell) =
-      coordToRef coord <> "=" <> displayValue (cellValue cell)
-
-    displayValue CellEmpty = "<empty>"
-    displayValue (CellNumber n) = T.pack (show n)
-    displayValue (CellText t) = "\"" <> t <> "\""
-    displayValue (CellBoolean b) = if b then "TRUE" else "FALSE"
-    displayValue (CellError _) = "<error>" -- Shouldn't reach here due to filter
+    formatValidCell (coord, cell) = case cellValue cell of
+      CellNumber n -> Just $ coordToRef coord <> "=" <> T.pack (show n)
+      CellText t -> Just $ coordToRef coord <> "=\"" <> t <> "\""
+      CellBoolean b -> Just $ coordToRef coord <> "=" <> if b then "TRUE" else "FALSE"
+      _ -> Nothing
 
 -- Exported version of gridContext for debugging
 gridContextText :: Grid -> Text
@@ -333,9 +320,7 @@ isLikelyColLetter t =
 
 functionSuggestions :: Text -> [Suggestion]
 functionSuggestions prefix =
-  let upper = T.toUpper prefix
-      matches = filter (T.isPrefixOf upper . funcName) formulaFunctions
-   in map functionToSuggestion (take 8 matches)
+  map functionToSuggestion . take 8 . filter (T.isPrefixOf (T.toUpper prefix) . funcName) $ formulaFunctions
 
 functionToSuggestion :: FormulaFunction -> Suggestion
 functionToSuggestion FormulaFunction {..} =
@@ -380,10 +365,7 @@ cellToSuggestion ref =
 -- Extract all cell references from a formula text (e.g., "=A1+B2" -> [(1,1), (2,2)])
 -- Also expands ranges like A1:A3 -> [A1, A2, A3]
 extractCellRefs :: Text -> [Coord]
-extractCellRefs formula =
-  let tokens = tokenize (T.toUpper formula)
-      refs = concatMap parseToken tokens
-   in refs
+extractCellRefs = concatMap parseToken . tokenize . T.toUpper
   where
     tokenize :: Text -> [Text]
     tokenize t =
@@ -426,7 +408,5 @@ findDirectDependents targetCoord grid =
   [ coord
   | (coord, cell) <- Map.toList grid,
     coord /= targetCoord,
-    case cellFormula cell of
-      Just formula -> targetCoord `elem` extractCellRefs formula
-      Nothing -> False
+    maybe False (elem targetCoord . extractCellRefs) (cellFormula cell)
   ]
