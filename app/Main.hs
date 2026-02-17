@@ -10,7 +10,7 @@ import Data.Aeson qualified as Aeson
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Foldable (traverse_)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -169,6 +169,17 @@ main = do
               (unPositiveInt $ gridDefaultRows gridCfg)
               (unPositiveInt $ gridDefaultCols gridCfg)
       json $ object ["suggestions" .= suggestions]
+
+    post "/api/demo" $ do
+      isEmpty <- liftIO $ null . gridToList <$> readTVarIO (appGrid state)
+      if isEmpty
+        then do
+          liftIO $ atomically $ writeTVar (appGrid state) demoGrid
+          (grid, stats) <- liftIO $ runApp state readAppState
+          json $ object ["success" .= True, "cells" .= gridToJson grid, "stats" .= stats, "loaded" .= True]
+        else do
+          (grid, stats) <- liftIO $ runApp state readAppState
+          json $ object ["success" .= True, "cells" .= gridToJson grid, "stats" .= stats, "loaded" .= False]
 
 jsonParam :: (Aeson.FromJSON a) => Text -> ActionM a
 jsonParam name = do
@@ -402,3 +413,39 @@ recalcCell env statsVar cfg grid (coord, cell) = case cellFormula cell of
     newCell <- evaluateAndBuildCell env formula grid
     atomically $ modifyTVar' statsVar (<> statsFromConfig (configStats cfg))
     pure $ setCell coord newCell grid
+
+-- | Demo spreadsheet pre-loaded on first visit
+demoGrid :: Grid
+demoGrid =
+  gridFromList $
+    catMaybes
+      [ lit 1 1 (CellText "Item") "Item"
+      , lit 1 2 (CellText "Price") "Price"
+      , lit 1 3 (CellText "Qty") "Qty"
+      , lit 1 4 (CellText "Total") "Total"
+      , lit 2 1 (CellText "Apples") "Apples"
+      , lit 2 2 (CellNumber 3.50) "3.5"
+      , lit 2 3 (CellNumber 4) "4"
+      , formula 2 4 (CellNumber 14) "=B2*C2" "14"
+      , lit 3 1 (CellText "Bananas") "Bananas"
+      , lit 3 2 (CellNumber 1.25) "1.25"
+      , lit 3 3 (CellNumber 6) "6"
+      , formula 3 4 (CellNumber 7.5) "=B3*C3" "7.5"
+      , lit 4 1 (CellText "Oranges") "Oranges"
+      , lit 4 2 (CellNumber 2.00) "2"
+      , lit 4 3 (CellNumber 3) "3"
+      , formula 4 4 (CellNumber 6) "=B4*C4" "6"
+      , lit 6 1 (CellText "Grand Total") "Grand Total"
+      , formula 6 4 (CellNumber 27.5) "=SUM(D2:D4)" "27.5"
+      , lit 8 1 (CellText "Try natural language →") "Try natural language →"
+      , formula 8 2 (CellText "TRUE") "=is 17 a prime number?" "TRUE"
+      ]
+  where
+    lit :: Int -> Int -> CellValue -> Text -> Maybe (Coord, Cell)
+    lit r c val display = do
+      coord <- mkCoord r c
+      pure (coord, mkLiteralCell val display)
+    formula :: Int -> Int -> CellValue -> Text -> Text -> Maybe (Coord, Cell)
+    formula r c val f display = do
+      coord <- mkCoord r c
+      pure (coord, mkFormulaCell f val display)
